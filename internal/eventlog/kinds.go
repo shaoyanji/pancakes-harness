@@ -12,4 +12,6 @@ const (
 	KindPacketCandidate   = "packet.candidate"
 	KindPacketSent        = "packet.sent"
 	KindPacketRejected    = "packet.rejected_budget"
+	KindResponseReceived  = "response.received"
+	KindResponseInvalid   = "response.invalid_schema"
 )
