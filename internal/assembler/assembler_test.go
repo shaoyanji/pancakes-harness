@@ -136,3 +136,45 @@ func TestCompactionIsDeterministic(t *testing.T) {
 		t.Fatalf("envelope exceeds max: %d", first.Measurement.EnvelopeBytes)
 	}
 }
+
+func TestFollowupPacketIncludesMinimalToolExcerptOnly(t *testing.T) {
+	t.Parallel()
+
+	fullPayload := strings.Repeat("TOOL-PAYLOAD-", 400)
+	req := Request{
+		Method: "POST",
+		Path:   "/v1/responses",
+		Headers: []Header{
+			{Name: "Content-Type", Value: "application/json"},
+		},
+		Body: PacketBody{
+			SessionID:    "s4",
+			BranchHandle: "b:main",
+			WorkingSet: []WorkingItem{
+				{
+					ID:              "tool-1",
+					Kind:            "tool.result",
+					Text:            fullPayload,
+					SummaryRef:      "summary://tool/c1",
+					BlobRef:         "blob://tool/full",
+					FrontierOrdinal: 3,
+				},
+			},
+		},
+	}
+
+	result, err := Assemble(req)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+
+	if BodyContainsText(result.BodyJSON, fullPayload) {
+		t.Fatal("follow-up packet should not include full tool payload")
+	}
+	if !BodyContainsText(result.BodyJSON, "summary://tool/c1") {
+		t.Fatal("follow-up packet should keep tool summary ref")
+	}
+	if !BodyContainsText(result.BodyJSON, "blob://tool/full") {
+		t.Fatal("follow-up packet should keep blob ref for local replay/reuse")
+	}
+}

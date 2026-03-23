@@ -9,6 +9,7 @@ const (
 	// LargeTextInlineThresholdBytes controls when text is treated as large local data.
 	// When a blob reference exists, large text is never shipped inline.
 	LargeTextInlineThresholdBytes = 1024
+	ToolResultExcerptBytes        = 256
 )
 
 var ErrPacketRejectedBudget = errors.New("packet rejected by budget")

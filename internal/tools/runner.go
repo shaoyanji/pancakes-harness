@@ -7,7 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
+)
+
+const (
+	DefaultMaxStdoutBytes = 1024 * 1024
+	DefaultMaxStderrBytes = 256 * 1024
 )
 
 type CommandSpec struct {
@@ -16,15 +22,31 @@ type CommandSpec struct {
 }
 
 type Runner struct {
-	commands map[string]CommandSpec
+	commands       map[string]CommandSpec
+	maxStdoutBytes int
+	maxStderrBytes int
 }
 
 func NewRunner(commands map[string]CommandSpec) *Runner {
+	return NewRunnerWithLimits(commands, DefaultMaxStdoutBytes, DefaultMaxStderrBytes)
+}
+
+func NewRunnerWithLimits(commands map[string]CommandSpec, maxStdoutBytes, maxStderrBytes int) *Runner {
 	copied := make(map[string]CommandSpec, len(commands))
 	for k, v := range commands {
 		copied[k] = v
 	}
-	return &Runner{commands: copied}
+	if maxStdoutBytes <= 0 {
+		maxStdoutBytes = DefaultMaxStdoutBytes
+	}
+	if maxStderrBytes <= 0 {
+		maxStderrBytes = DefaultMaxStderrBytes
+	}
+	return &Runner{
+		commands:       copied,
+		maxStdoutBytes: maxStdoutBytes,
+		maxStderrBytes: maxStderrBytes,
+	}
 }
 
 func (r *Runner) Run(ctx context.Context, req Request) Response {
@@ -44,23 +66,33 @@ func (r *Runner) Run(ctx context.Context, req Request) Response {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	input, _ := json.Marshal(req)
+	input, marshalErr := json.Marshal(req)
+	if marshalErr != nil {
+		return FailureFromError(req.CallID, ErrorTypeSchema, fmt.Sprintf("request json encode failed: %v", marshalErr))
+	}
 	cmd := exec.CommandContext(runCtx, spec.Path, spec.Args...)
 	cmd.Stdin = bytes.NewReader(input)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout := newCappedBuffer(r.maxStdoutBytes)
+	stderr := newCappedBuffer(r.maxStderrBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 
 	err := cmd.Run()
 	if runCtx.Err() != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		return FailureFromError(req.CallID, ErrorTypeTimeout, "tool execution timed out")
 	}
+	if stdout.Truncated() {
+		return FailureFromError(req.CallID, ErrorTypeSchema, fmt.Sprintf("tool stdout exceeded %d bytes limit", r.maxStdoutBytes))
+	}
 	if err != nil {
 		msg := "tool subprocess failed"
-		if stderr.Len() > 0 {
-			msg = fmt.Sprintf("%s: %s", msg, stderr.String())
+		trimmed := strings.TrimSpace(stderr.String())
+		if trimmed != "" {
+			msg = fmt.Sprintf("%s: %s", msg, trimmed)
+		}
+		if stderr.Truncated() {
+			msg = fmt.Sprintf("%s [stderr truncated at %d bytes]", msg, r.maxStderrBytes)
 		}
 		return FailureFromError(req.CallID, ErrorTypeExec, msg)
 	}

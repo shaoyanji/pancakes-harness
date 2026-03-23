@@ -95,6 +95,9 @@ func normalizeRequest(req Request) Request {
 	})
 
 	for i := range body.WorkingSet {
+		if body.WorkingSet[i].Kind == "tool.result" {
+			body.WorkingSet[i] = normalizeToolResultItem(body.WorkingSet[i])
+		}
 		if body.WorkingSet[i].BlobRef != "" && len(body.WorkingSet[i].Text) > LargeTextInlineThresholdBytes {
 			body.WorkingSet[i].Text = ""
 		}
@@ -196,4 +199,15 @@ func applyCompactionStage(body PacketBody, stage int) PacketBody {
 
 func BodyContainsText(payload []byte, text string) bool {
 	return bytes.Contains(payload, []byte(text))
+}
+
+func normalizeToolResultItem(item WorkingItem) WorkingItem {
+	if item.SummaryRef != "" {
+		item.Text = ""
+		return item
+	}
+	if len(item.Text) > ToolResultExcerptBytes {
+		item.Text = item.Text[:ToolResultExcerptBytes]
+	}
+	return item
 }

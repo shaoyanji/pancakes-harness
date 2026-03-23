@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,123 @@ func TestNonZeroExitBecomesExecFailure(t *testing.T) {
 	}
 	if resp.Error == nil || resp.Error.Type != ErrorTypeExec {
 		t.Fatalf("expected exec failure type, got %#v", resp.Error)
+	}
+	if strings.Contains(resp.Error.Message, "\n") {
+		t.Fatalf("stderr should be trimmed in exec message, got %q", resp.Error.Message)
+	}
+}
+
+func TestRequestMarshalFailureBecomesSchemaFailure(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunner(map[string]CommandSpec{
+		"echo_tool": {
+			Path: "sh",
+			Args: []string{"-c", `cat >/dev/null; printf '{"ok":true,"call_id":"c6","result":{},"summary":"done","artifacts":[]}'`},
+		},
+	})
+	req := Request{
+		Tool:      "echo_tool",
+		CallID:    "c6",
+		Args:      map[string]any{"bad": make(chan int)},
+		TimeoutMS: 1000,
+	}
+
+	resp := runner.Run(context.Background(), req)
+	if resp.OK {
+		t.Fatalf("expected schema failure, got success: %#v", resp)
+	}
+	if resp.Error == nil || resp.Error.Type != ErrorTypeSchema {
+		t.Fatalf("expected schema error type, got %#v", resp.Error)
+	}
+}
+
+func TestOversizedStdoutHandledPredictably(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunnerWithLimits(map[string]CommandSpec{
+		"big_out": {
+			Path: "sh",
+			Args: []string{"-c", `cat >/dev/null; payload=$(head -c 10000 /dev/zero | tr '\000' x); printf '{"ok":true,"call_id":"c7","result":{"data":"%s"},"summary":"done","artifacts":[]}' "$payload"`},
+		},
+	}, 512, 1024)
+
+	req := Request{
+		Tool:      "big_out",
+		CallID:    "c7",
+		Args:      map[string]any{},
+		TimeoutMS: 2000,
+	}
+
+	resp := runner.Run(context.Background(), req)
+	if resp.OK {
+		t.Fatalf("expected schema failure for oversized stdout, got success: %#v", resp)
+	}
+	if resp.Error == nil || resp.Error.Type != ErrorTypeSchema {
+		t.Fatalf("expected schema failure type, got %#v", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "stdout exceeded") {
+		t.Fatalf("expected predictable stdout limit message, got %q", resp.Error.Message)
+	}
+}
+
+func TestOversizedStderrHandledPredictably(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunnerWithLimits(map[string]CommandSpec{
+		"big_err": {
+			Path: "sh",
+			Args: []string{"-c", `head -c 5000 /dev/zero | tr '\000' e 1>&2; exit 9`},
+		},
+	}, 1024, 128)
+
+	req := Request{
+		Tool:      "big_err",
+		CallID:    "c8",
+		Args:      map[string]any{},
+		TimeoutMS: 2000,
+	}
+
+	resp := runner.Run(context.Background(), req)
+	if resp.OK {
+		t.Fatalf("expected exec failure for oversized stderr, got success: %#v", resp)
+	}
+	if resp.Error == nil || resp.Error.Type != ErrorTypeExec {
+		t.Fatalf("expected exec failure type, got %#v", resp.Error)
+	}
+	if !strings.Contains(resp.Error.Message, "stderr truncated") {
+		t.Fatalf("expected truncated stderr marker, got %q", resp.Error.Message)
+	}
+}
+
+func TestExecFailureStderrFormattingTrimmed(t *testing.T) {
+	t.Parallel()
+
+	runner := NewRunner(map[string]CommandSpec{
+		"trim_err": {
+			Path: "sh",
+			Args: []string{"-c", "printf '  boom with spaces  \\n\\n' 1>&2; exit 3"},
+		},
+	})
+	req := Request{
+		Tool:      "trim_err",
+		CallID:    "c9",
+		Args:      map[string]any{},
+		TimeoutMS: 1000,
+	}
+
+	resp := runner.Run(context.Background(), req)
+	if resp.OK {
+		t.Fatalf("expected exec failure, got success: %#v", resp)
+	}
+	if resp.Error == nil || resp.Error.Type != ErrorTypeExec {
+		t.Fatalf("expected exec failure type, got %#v", resp.Error)
+	}
+	if strings.Contains(resp.Error.Message, "\n") {
+		t.Fatalf("stderr should be trimmed, got %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "boom with spaces") {
+		t.Fatalf("expected stderr contents in message, got %q", resp.Error.Message)
 	}
 }
 
