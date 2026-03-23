@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"pancakes-harness/internal/branchdag"
 	"pancakes-harness/internal/eventlog"
+	"pancakes-harness/internal/summaries"
 )
 
 func TestRebuildFromStoreReconstructsBranchHeads(t *testing.T) {
@@ -103,5 +105,128 @@ func TestRebuildSessionDeterministic(t *testing.T) {
 
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("replay must be deterministic:\nfirst=%#v\nsecond=%#v", first, second)
+	}
+}
+
+func TestSummaryCheckpointRebuildWorks(t *testing.T) {
+	t.Parallel()
+
+	baseBranch := branchdag.Branch{
+		BranchID:      "main",
+		BaseSummaryID: "sum-1",
+	}
+	checkpoint := summaries.SummaryCheckpoint{
+		SummaryID:    "sum-1",
+		BranchID:     "main",
+		BasisEventID: "e2",
+		CoveredRange: summaries.CoveredRange{
+			StartEventID: "e1",
+			EndEventID:   "e2",
+		},
+		BlobRef: "blob://sum-1",
+	}
+	ts := time.Date(2026, 2, 2, 3, 4, 5, 0, time.UTC)
+	delta := []eventlog.Event{
+		{
+			ID:        "e3",
+			SessionID: "s1",
+			TS:        ts,
+			Kind:      eventlog.KindTurnUser,
+			BranchID:  "main",
+		},
+		{
+			ID:        "e4",
+			SessionID: "s1",
+			TS:        ts.Add(time.Second),
+			Kind:      eventlog.KindTurnAgent,
+			BranchID:  "main",
+		},
+	}
+
+	got, err := RebuildBranchFromSummaryDelta(baseBranch, checkpoint, delta)
+	if err != nil {
+		t.Fatalf("rebuild summary+delta: %v", err)
+	}
+	if got.HeadEventID != "e4" {
+		t.Fatalf("expected head e4, got %q", got.HeadEventID)
+	}
+	if got.BaseSummaryID != "sum-1" {
+		t.Fatalf("expected base summary sum-1, got %q", got.BaseSummaryID)
+	}
+	if len(got.DirtyRanges) != 1 || got.DirtyRanges[0].StartEventID != "e3" || got.DirtyRanges[0].EndEventID != "e4" {
+		t.Fatalf("unexpected dirty ranges: %#v", got.DirtyRanges)
+	}
+}
+
+func TestReplayReconstructsBranchStateFromSummaryAndDelta(t *testing.T) {
+	t.Parallel()
+
+	branch := branchdag.Branch{BranchID: "main"}
+	checkpoint := summaries.SummaryCheckpoint{
+		SummaryID:    "sum-1",
+		BranchID:     "main",
+		BasisEventID: "e2",
+		CoveredRange: summaries.CoveredRange{
+			StartEventID: "e1",
+			EndEventID:   "e2",
+		},
+		TextRef: "summary://s1",
+	}
+
+	ts := time.Date(2026, 2, 2, 3, 4, 5, 0, time.UTC)
+	sessionEvents := []eventlog.Event{
+		{ID: "e1", SessionID: "s1", TS: ts, Kind: eventlog.KindTurnUser, BranchID: "main"},
+		{ID: "e2", SessionID: "s1", TS: ts.Add(time.Second), Kind: eventlog.KindTurnAgent, BranchID: "main"},
+		{ID: "e3", SessionID: "s1", TS: ts.Add(2 * time.Second), Kind: eventlog.KindTurnUser, BranchID: "main"},
+		{ID: "x1", SessionID: "s1", TS: ts.Add(3 * time.Second), Kind: eventlog.KindTurnUser, BranchID: "other"},
+		{ID: "e4", SessionID: "s1", TS: ts.Add(4 * time.Second), Kind: eventlog.KindTurnAgent, BranchID: "main"},
+	}
+
+	got, err := RebuildBranchFromSummaryAndEvents(branch, checkpoint, sessionEvents)
+	if err != nil {
+		t.Fatalf("rebuild from summary+events: %v", err)
+	}
+	if got.HeadEventID != "e4" {
+		t.Fatalf("expected head e4, got %q", got.HeadEventID)
+	}
+	if len(got.DirtyRanges) != 1 || got.DirtyRanges[0].StartEventID != "e3" || got.DirtyRanges[0].EndEventID != "e4" {
+		t.Fatalf("unexpected dirty ranges: %#v", got.DirtyRanges)
+	}
+}
+
+func TestParentChildBranchLineagePreserved(t *testing.T) {
+	t.Parallel()
+
+	ts := time.Date(2026, 2, 2, 3, 4, 5, 0, time.UTC)
+	events := []eventlog.Event{
+		{ID: "e1", SessionID: "s1", TS: ts, Kind: eventlog.KindTurnUser, BranchID: "main"},
+		{ID: "e2", SessionID: "s1", TS: ts.Add(time.Second), Kind: eventlog.KindTurnAgent, BranchID: "main"},
+		{
+			ID:            "e3",
+			SessionID:     "s1",
+			TS:            ts.Add(2 * time.Second),
+			Kind:          eventlog.KindBranchFork,
+			BranchID:      "alt",
+			ParentEventID: "e2",
+			Meta: map[string]any{
+				"parent_branch_id": "main",
+			},
+		},
+		{ID: "e4", SessionID: "s1", TS: ts.Add(3 * time.Second), Kind: eventlog.KindTurnUser, BranchID: "alt"},
+	}
+
+	branches, err := RebuildBranchStateFromEvents(events)
+	if err != nil {
+		t.Fatalf("rebuild branch state: %v", err)
+	}
+	alt := branches["alt"]
+	if alt.ParentBranchID != "main" {
+		t.Fatalf("expected alt parent main, got %q", alt.ParentBranchID)
+	}
+	if alt.ForkEventID != "e2" {
+		t.Fatalf("expected alt fork event e2, got %q", alt.ForkEventID)
+	}
+	if alt.HeadEventID != "e4" {
+		t.Fatalf("expected alt head e4, got %q", alt.HeadEventID)
 	}
 }
