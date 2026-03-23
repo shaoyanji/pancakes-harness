@@ -3,6 +3,9 @@ package eventlog
 const (
 	KindTurnUser          = "turn.user"
 	KindTurnAgent         = "turn.agent"
+	KindToolRequest       = "tool.request"
+	KindToolResult        = "tool.result"
+	KindToolFailure       = "tool.failure"
 	KindSummaryCheckpoint = "summary.checkpoint"
 	KindSummaryRebuild    = "summary.rebuild"
 	KindBranchFork        = "branch.fork"

@@ -230,3 +230,78 @@ func TestParentChildBranchLineagePreserved(t *testing.T) {
 		t.Fatalf("expected alt head e4, got %q", alt.HeadEventID)
 	}
 }
+
+func TestReplayPreservesToolEventsCleanly(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store := eventlog.NewMemoryStore()
+	ts := time.Date(2026, 3, 2, 3, 4, 5, 0, time.UTC)
+
+	events := []eventlog.Event{
+		{
+			ID:        "e1",
+			SessionID: "s-tools",
+			TS:        ts,
+			Kind:      eventlog.KindTurnUser,
+			BranchID:  "main",
+		},
+		{
+			ID:        "e2",
+			SessionID: "s-tools",
+			TS:        ts.Add(time.Second),
+			Kind:      eventlog.KindToolRequest,
+			BranchID:  "main",
+			Meta: map[string]any{
+				"tool":    "echo_tool",
+				"call_id": "c1",
+			},
+		},
+		{
+			ID:        "e3",
+			SessionID: "s-tools",
+			TS:        ts.Add(2 * time.Second),
+			Kind:      eventlog.KindToolResult,
+			BranchID:  "main",
+			BlobRef:   "blob://tool-output",
+			Meta: map[string]any{
+				"tool":    "echo_tool",
+				"call_id": "c1",
+				"summary": "ok",
+			},
+		},
+	}
+
+	for _, e := range events {
+		if err := store.Append(ctx, e); err != nil {
+			t.Fatalf("append %s: %v", e.ID, err)
+		}
+	}
+
+	sessionState, err := RebuildFromStore(ctx, store, "s-tools")
+	if err != nil {
+		t.Fatalf("session replay: %v", err)
+	}
+	if sessionState.EventCount != 3 {
+		t.Fatalf("expected 3 events, got %d", sessionState.EventCount)
+	}
+	if sessionState.BranchHeads["main"] != "e3" {
+		t.Fatalf("expected main head e3, got %q", sessionState.BranchHeads["main"])
+	}
+
+	stored, err := store.ListBySession(ctx, "s-tools")
+	if err != nil {
+		t.Fatalf("list session: %v", err)
+	}
+	branches, err := RebuildBranchStateFromEvents(stored)
+	if err != nil {
+		t.Fatalf("branch replay: %v", err)
+	}
+	main := branches["main"]
+	if main.HeadEventID != "e3" {
+		t.Fatalf("expected branch head e3, got %q", main.HeadEventID)
+	}
+	if len(main.DirtyRanges) != 1 || main.DirtyRanges[0].StartEventID != "e1" || main.DirtyRanges[0].EndEventID != "e3" {
+		t.Fatalf("unexpected dirty range after tool events: %#v", main.DirtyRanges)
+	}
+}
