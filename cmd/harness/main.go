@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"pancakes-harness/internal/backend/xs"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/runtime"
+	"pancakes-harness/internal/server"
 	"pancakes-harness/internal/tools"
 )
 
@@ -31,6 +34,8 @@ const (
 	envSessionID       = "HARNESS_SESSION_ID"
 	envBranchID        = "HARNESS_BRANCH_ID"
 	envXSCommand       = "HARNESS_XS_COMMAND"
+	envServeBind       = "HARNESS_SERVE_BIND"
+	envServePort       = "HARNESS_SERVE_PORT"
 )
 
 var (
@@ -55,11 +60,24 @@ type launcherConfig struct {
 	branchID    string
 }
 
+type serveConfig struct {
+	launcher launcherConfig
+	bindAddr string
+	port     int
+}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getenv))
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
+	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "serve") {
+		return runServe(args[1:], stdout, stderr, getenv)
+	}
+	return runOneShot(args, stdin, stdout, stderr, getenv)
+}
+
+func runOneShot(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
 	cfg, prompt, err := parseConfig(args, stdin, getenv)
 	if err != nil {
 		fmt.Fprintf(stderr, "config error: %v\n", err)
@@ -78,20 +96,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return 2
 	}
 
-	headers := []assembler.Header{
-		{Name: "Content-Type", Value: "application/json"},
-	}
-	if cfg.authValue != "" {
-		headers = append(headers, assembler.Header{Name: cfg.authHeader, Value: cfg.authValue})
-	}
-
 	s, err := runtime.StartSession(runtime.Config{
 		SessionID:       cfg.sessionID,
 		DefaultBranchID: cfg.branchID,
 		Backend:         b,
 		ModelAdapter:    adapter,
 		ToolRunner:      tools.NewRunner(nil),
-		ModelHeaders:    headers,
+		ModelHeaders:    buildModelHeaders(cfg),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "start session: %v\n", err)
@@ -118,10 +129,95 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 	return 0
 }
 
+func runServe(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+	cfg, err := parseServeConfig(args, getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return 2
+	}
+
+	b, err := buildBackend(cfg.launcher)
+	if err != nil {
+		fmt.Fprintf(stderr, "backend error: %v\n", err)
+		return 2
+	}
+	adapter, err := buildAdapter(cfg.launcher)
+	if err != nil {
+		fmt.Fprintf(stderr, "adapter error: %v\n", err)
+		return 2
+	}
+
+	api, err := server.New(server.Config{
+		Backend:      b,
+		ModelAdapter: adapter,
+		ToolRunner:   tools.NewRunner(nil),
+		ModelHeaders: buildModelHeaders(cfg.launcher),
+		Timeout:      cfg.launcher.modelTimeout,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "server init error: %v\n", err)
+		return 1
+	}
+
+	addr := fmt.Sprintf("%s:%d", cfg.bindAddr, cfg.port)
+	httpSrv := &http.Server{
+		Addr:    addr,
+		Handler: api.Handler(),
+	}
+	fmt.Fprintf(stdout, "serving on http://%s\n", addr)
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		fmt.Fprintf(stderr, "serve failed: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (launcherConfig, string, error) {
-	defaultTimeout, err := parseDurationOrDefault(getenv(envModelTimeout), 10*time.Second)
+	cfg, err := parseLauncherFlags(args, getenv)
 	if err != nil {
 		return launcherConfig{}, "", err
+	}
+	prompt, err := readPrompt(cfg.remainingArgs, stdin)
+	if err != nil {
+		return launcherConfig{}, "", err
+	}
+	return cfg.launcher, prompt, nil
+}
+
+func parseServeConfig(args []string, getenv func(string) string) (serveConfig, error) {
+	parsed, err := parseLauncherFlags(args, getenv)
+	if err != nil {
+		return serveConfig{}, err
+	}
+	if len(parsed.remainingArgs) > 0 {
+		return serveConfig{}, errors.New("unexpected positional args for serve mode")
+	}
+	bind := strings.TrimSpace(parsed.bindAddr)
+	if bind == "" {
+		return serveConfig{}, errors.New("bind address is required")
+	}
+	if parsed.port <= 0 {
+		return serveConfig{}, errors.New("port must be > 0")
+	}
+
+	return serveConfig{
+		launcher: parsed.launcher,
+		bindAddr: bind,
+		port:     parsed.port,
+	}, nil
+}
+
+type parsedFlags struct {
+	launcher      launcherConfig
+	bindAddr      string
+	port          int
+	remainingArgs []string
+}
+
+func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags, error) {
+	defaultTimeout, err := parseDurationOrDefault(getenv(envModelTimeout), 10*time.Second)
+	if err != nil {
+		return parsedFlags{}, err
 	}
 
 	modelModeDefault := stringOrDefault(getenv(envModelMode), "mock")
@@ -135,6 +231,11 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	sessionIDDefault := stringOrDefault(getenv(envSessionID), "demo")
 	branchIDDefault := stringOrDefault(getenv(envBranchID), "main")
 	xsCommandDefault := stringOrDefault(getenv(envXSCommand), "xs")
+	serveBindDefault := stringOrDefault(getenv(envServeBind), "127.0.0.1")
+	servePortDefault, err := parseIntOrDefault(getenv(envServePort), 8080)
+	if err != nil {
+		return parsedFlags{}, err
+	}
 
 	fs := flag.NewFlagSet("harness", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -151,6 +252,8 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	xsCommand := xsCommandDefault
 	sessionID := sessionIDDefault
 	branchID := branchIDDefault
+	serveBind := serveBindDefault
+	servePort := servePortDefault
 
 	fs.StringVar(&modelMode, "model-mode", modelModeDefault, "model adapter mode: mock|http|ollama")
 	fs.StringVar(&modelEndpoint, "model-endpoint", modelEndpointDefault, "HTTP model endpoint URL")
@@ -164,14 +267,11 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	fs.StringVar(&xsCommand, "xs-command", xsCommandDefault, "xs command path when backend-mode=xs")
 	fs.StringVar(&sessionID, "session-id", sessionIDDefault, "session id")
 	fs.StringVar(&branchID, "branch-id", branchIDDefault, "branch id")
+	fs.StringVar(&serveBind, "bind", serveBindDefault, "bind address (serve mode)")
+	fs.IntVar(&servePort, "port", servePortDefault, "bind port (serve mode)")
 
 	if err := fs.Parse(args); err != nil {
-		return launcherConfig{}, "", err
-	}
-
-	prompt, err := readPrompt(fs.Args(), stdin)
-	if err != nil {
-		return launcherConfig{}, "", err
+		return parsedFlags{}, err
 	}
 
 	modelMode = strings.ToLower(strings.TrimSpace(modelMode))
@@ -187,19 +287,19 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	branchID = strings.TrimSpace(branchID)
 
 	if modelMode != "mock" && modelMode != "http" && modelMode != "ollama" {
-		return launcherConfig{}, "", fmt.Errorf("%w: %q", errUnsupportedModelMode, modelMode)
+		return parsedFlags{}, fmt.Errorf("%w: %q", errUnsupportedModelMode, modelMode)
 	}
 	if backendMode != "memory" && backendMode != "xs" {
-		return launcherConfig{}, "", fmt.Errorf("%w: %q", errUnsupportedBackend, backendMode)
+		return parsedFlags{}, fmt.Errorf("%w: %q", errUnsupportedBackend, backendMode)
 	}
 	if modelMode == "http" && modelEndpoint == "" {
-		return launcherConfig{}, "", errors.New("model endpoint is required in http mode")
+		return parsedFlags{}, errors.New("model endpoint is required in http mode")
 	}
 	if modelMode == "ollama" && ollamaModel == "" {
-		return launcherConfig{}, "", errors.New("ollama model is required in ollama mode")
+		return parsedFlags{}, errors.New("ollama model is required in ollama mode")
 	}
 	if modelBearer != "" && modelAuthKey != "" {
-		return launcherConfig{}, "", errConflictingAuth
+		return parsedFlags{}, errConflictingAuth
 	}
 
 	authValue := modelAuthKey
@@ -207,20 +307,24 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 		authValue = "Bearer " + modelBearer
 	}
 
-	cfg := launcherConfig{
-		modelMode:      modelMode,
-		modelEndpoint:  modelEndpoint,
-		modelTimeout:   modelTimeout,
-		ollamaEndpoint: ollamaEndpoint,
-		ollamaModel:    ollamaModel,
-		authHeader:     modelAuthHeader,
-		authValue:      authValue,
-		backendMode:    backendMode,
-		xsCommand:      xsCommand,
-		sessionID:      sessionID,
-		branchID:       branchID,
-	}
-	return cfg, prompt, nil
+	return parsedFlags{
+		launcher: launcherConfig{
+			modelMode:      modelMode,
+			modelEndpoint:  modelEndpoint,
+			modelTimeout:   modelTimeout,
+			ollamaEndpoint: ollamaEndpoint,
+			ollamaModel:    ollamaModel,
+			authHeader:     modelAuthHeader,
+			authValue:      authValue,
+			backendMode:    backendMode,
+			xsCommand:      xsCommand,
+			sessionID:      sessionID,
+			branchID:       branchID,
+		},
+		bindAddr:      strings.TrimSpace(serveBind),
+		port:          servePort,
+		remainingArgs: fs.Args(),
+	}, nil
 }
 
 func readPrompt(args []string, stdin io.Reader) (string, error) {
@@ -279,6 +383,16 @@ func buildAdapter(cfg launcherConfig) (model.Adapter, error) {
 	}
 }
 
+func buildModelHeaders(cfg launcherConfig) []assembler.Header {
+	headers := []assembler.Header{
+		{Name: "Content-Type", Value: "application/json"},
+	}
+	if cfg.authValue != "" {
+		headers = append(headers, assembler.Header{Name: cfg.authHeader, Value: cfg.authValue})
+	}
+	return headers
+}
+
 func stringOrDefault(v, d string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -297,4 +411,16 @@ func parseDurationOrDefault(raw string, d time.Duration) (time.Duration, error) 
 		return 0, fmt.Errorf("invalid %s=%q: %w", envModelTimeout, raw, err)
 	}
 	return parsed, nil
+}
+
+func parseIntOrDefault(raw string, d int) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return d, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("invalid %s=%q", envServePort, raw)
+	}
+	return n, nil
 }
