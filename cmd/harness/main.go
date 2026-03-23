@@ -3,25 +3,29 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"pancakes-harness/internal/eventlog"
-	"pancakes-harness/internal/replay"
+	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/model"
+	"pancakes-harness/internal/runtime"
+	"pancakes-harness/internal/tools"
 )
 
 func main() {
-	store := eventlog.NewMemoryStore()
-	_ = store.Append(context.Background(), eventlog.Event{
-		ID:        "bootstrap",
+	s, err := runtime.StartSession(runtime.Config{
 		SessionID: "demo",
-		TS:        time.Now().UTC(),
-		Kind:      "system.warning",
-		BranchID:  "main",
+		Backend:   backend.NewMemoryBackend(),
+		ModelAdapter: model.MockAdapter{NameValue: "demo-mock", CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			return []byte(`{"decision":"answer","answer":"demo response"}`), nil
+		}},
+		ToolRunner: tools.NewRunner(nil),
 	})
-
-	state, err := replay.RebuildFromStore(context.Background(), store, "demo")
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("session=%s events=%d head=%s\n", state.SessionID, state.EventCount, state.LastEventID)
+
+	out, err := s.HandleUserTurn(context.Background(), "main", "hello harness")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("session=%s branch=%s answer=%q envelope_bytes=%d\n", out.SessionID, out.BranchID, out.Answer, out.PacketEnvelopeBytes)
 }
