@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"pancakes-harness/internal/assembler"
@@ -165,6 +166,112 @@ func TestGetHealthzReflectsBackendHealth(t *testing.T) {
 	}
 	if !out.OK || !out.Backend.OK {
 		t.Fatalf("expected healthy backend response, got %#v", out)
+	}
+}
+
+func TestMetricsReturnsValidJSON(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if _, ok := out["requests_total"]; !ok {
+		t.Fatalf("expected requests_total in metrics, got %#v", out)
+	}
+}
+
+func TestMetricsUpdateAfterTurn(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+
+	turnRec := httptest.NewRecorder()
+	turnReq := httptest.NewRequest(http.MethodPost, "/v1/turn", bytes.NewReader([]byte(`{"session_id":"s-metrics","branch_id":"main","text":"hello"}`)))
+	srv.Handler().ServeHTTP(turnRec, turnReq)
+	if turnRec.Code != http.StatusOK {
+		t.Fatalf("turn status: %d body=%s", turnRec.Code, turnRec.Body.String())
+	}
+
+	metricsRec := httptest.NewRecorder()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	srv.Handler().ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("metrics status: %d body=%s", metricsRec.Code, metricsRec.Body.String())
+	}
+
+	var out struct {
+		RequestsTotal map[string]int64 `json:"requests_total"`
+		LatenciesMS   map[string]struct {
+			Count int64 `json:"count"`
+		} `json:"latencies_ms"`
+	}
+	if err := json.Unmarshal(metricsRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if out.RequestsTotal["/v1/turn"] < 1 {
+		t.Fatalf("expected /v1/turn request counter increment, got %#v", out.RequestsTotal)
+	}
+	if out.LatenciesMS["turn_latency_ms"].Count < 1 {
+		t.Fatalf("expected turn latency observations, got %#v", out.LatenciesMS)
+	}
+}
+
+func TestMetricsPacketRejectionCounterIncrements(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	a := model.MockAdapter{
+		NameValue: "mock",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			return []byte(`{"decision":"answer","answer":"ok"}`), nil
+		},
+	}
+	hugeHeader := strings.Repeat("x", 15000)
+	srv, err := New(Config{
+		Backend:      mem,
+		ModelAdapter: a,
+		ToolRunner:   tools.NewRunner(nil),
+		ModelHeaders: []assembler.Header{
+			{Name: "Content-Type", Value: "application/json"},
+			{Name: "X-Huge", Value: hugeHeader},
+		},
+	})
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	turnRec := httptest.NewRecorder()
+	turnReq := httptest.NewRequest(http.MethodPost, "/v1/turn", bytes.NewReader([]byte(`{"session_id":"s-reject","branch_id":"main","text":"hello"}`)))
+	srv.Handler().ServeHTTP(turnRec, turnReq)
+	if turnRec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected rejection path, got %d body=%s", turnRec.Code, turnRec.Body.String())
+	}
+
+	metricsRec := httptest.NewRecorder()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	srv.Handler().ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("metrics status: %d body=%s", metricsRec.Code, metricsRec.Body.String())
+	}
+	var out struct {
+		PacketBudgetRejectionsTotal int64 `json:"packet_budget_rejections_total"`
+	}
+	if err := json.Unmarshal(metricsRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode metrics: %v", err)
+	}
+	if out.PacketBudgetRejectionsTotal < 1 {
+		t.Fatalf("expected packet budget rejection counter to increment, got %d", out.PacketBudgetRejectionsTotal)
 	}
 }
 

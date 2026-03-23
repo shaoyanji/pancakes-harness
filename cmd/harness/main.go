@@ -15,6 +15,7 @@ import (
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/backend/xs"
+	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/server"
@@ -153,6 +154,9 @@ func runServe(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		ToolRunner:   tools.NewRunner(nil),
 		ModelHeaders: buildModelHeaders(cfg.launcher),
 		Timeout:      cfg.launcher.modelTimeout,
+		Metrics:      metrics.NewRegistry(),
+		BackendMode:  cfg.launcher.backendMode,
+		ModelMode:    cfg.launcher.modelMode,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "server init error: %v\n", err)

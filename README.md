@@ -626,6 +626,33 @@ If your agent needs more context, improve:
 
 Do **not** bypass the harness by sending larger raw context blobs.
 
+## Benchmarking:
+
+- Start server:
+
+GOCACHE=/tmp/go-build go run ./cmd/harness serve -model-mode ollama -ollama-model qwen3:0.6b
+-bind 127.0.0.1 -port 18083
+
+- Query metrics:
+
+curl -sS http://127.0.0.1:18083/metrics
+
+Direct-vs-harness comparison commands
+
+- Benchmark script command used:
+
+N=2 OLLAMA_MODEL=qwen3:0.6b OLLAMA_ENDPOINT=http://127.0.0.1:11434
+HARNESS_URL=http://127.0.0.1:18083 ./scripts/benchmark_compare.sh
+
+- Output observed:
+
+Benchmark comparison (N=2)
+direct_ollama_api_chat avg=2039ms max=3122ms n=2
+harness_v1_turn avg= 368ms max= 397ms n=2
+harness_v1_agent_call avg= 429ms max= 463ms n=2
+
+- the harness overhead appears low, and in this test the constrained harness path returned faster than the direct baseline.
+
 ---
 
 ## Final note

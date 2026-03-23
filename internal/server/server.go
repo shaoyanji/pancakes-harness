@@ -12,6 +12,7 @@ import (
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/eventlog"
+	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/tools"
@@ -27,6 +28,9 @@ type Config struct {
 	ToolRunner   *tools.Runner
 	ModelHeaders []assembler.Header
 	Timeout      time.Duration
+	Metrics      *metrics.Registry
+	BackendMode  string
+	ModelMode    string
 }
 
 type Server struct {
@@ -40,12 +44,17 @@ func New(cfg Config) (*Server, error) {
 	if cfg.ToolRunner == nil {
 		cfg.ToolRunner = tools.NewRunner(nil)
 	}
+	if cfg.Metrics == nil {
+		cfg.Metrics = metrics.NewRegistry()
+	}
+	cfg.Metrics.SetModes(cfg.BackendMode, cfg.ModelMode)
 	return &Server{cfg: cfg}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/v1/turn", s.handleTurn)
 	mux.HandleFunc("/v1/agent-call", s.handleAgentCall)
 	mux.HandleFunc("/v1/branch/fork", s.handleBranchFork)
@@ -140,12 +149,19 @@ type errorBody struct {
 }
 
 func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
+	const route = "/v1/turn"
+	s.cfg.Metrics.IncRequest(route)
+	started := time.Now()
+	defer s.cfg.Metrics.ObserveLatency("turn_latency_ms", time.Since(started))
+
 	if r.Method != http.MethodPost {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req turnRequest
 	if err := decodeJSONBody(r, &req); err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -153,6 +169,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 	req.BranchID = strings.TrimSpace(req.BranchID)
 	req.Text = strings.TrimSpace(req.Text)
 	if req.SessionID == "" || req.Text == "" {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "session_id and text are required")
 		return
 	}
@@ -163,6 +180,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 
 	session, err := s.startSession(req.SessionID, branch)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "runtime_error", err.Error())
 		return
 	}
@@ -170,6 +188,7 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	res, err := session.HandleUserTurn(ctx, branch, req.Text)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "turn_failed", err.Error())
 		return
 	}
@@ -184,12 +203,19 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
+	const route = "/v1/agent-call"
+	s.cfg.Metrics.IncRequest(route)
+	started := time.Now()
+	defer s.cfg.Metrics.ObserveLatency("agent_call_latency_ms", time.Since(started))
+
 	if r.Method != http.MethodPost {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req agentCallRequest
 	if err := decodeJSONBody(r, &req); err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -197,6 +223,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 	req.BranchID = strings.TrimSpace(req.BranchID)
 	req.Task = strings.TrimSpace(req.Task)
 	if req.SessionID == "" || req.Task == "" {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "session_id and task are required")
 		return
 	}
@@ -206,6 +233,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 	}
 	text, err := buildAgentCallText(req.Task, req.Refs, req.Constraints)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -216,6 +244,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := s.startSessionWithRunner(req.SessionID, branch, toolRunner)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "runtime_error", err.Error())
 		return
 	}
@@ -225,9 +254,11 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 	res, err := session.HandleUserTurn(ctx, branch, text)
 	if err != nil {
 		if errors.Is(err, runtime.ErrNoToolRunnerConfigured) && !req.AllowTools {
+			s.cfg.Metrics.IncError(route)
 			writeJSONError(w, http.StatusUnprocessableEntity, "tools_disabled", "model requested tool execution while allow_tools=false")
 			return
 		}
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "agent_call_failed", err.Error())
 		return
 	}
@@ -245,12 +276,16 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBranchFork(w http.ResponseWriter, r *http.Request) {
+	const route = "/v1/branch/fork"
+	s.cfg.Metrics.IncRequest(route)
 	if r.Method != http.MethodPost {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	var req branchForkRequest
 	if err := decodeJSONBody(r, &req); err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
@@ -258,18 +293,21 @@ func (s *Server) handleBranchFork(w http.ResponseWriter, r *http.Request) {
 	req.ParentBranchID = strings.TrimSpace(req.ParentBranchID)
 	req.ChildBranchID = strings.TrimSpace(req.ChildBranchID)
 	if req.SessionID == "" || req.ParentBranchID == "" || req.ChildBranchID == "" {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "bad_request", "session_id, parent_branch_id, and child_branch_id are required")
 		return
 	}
 
 	session, err := s.startSession(req.SessionID, req.ParentBranchID)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "runtime_error", err.Error())
 		return
 	}
 	ctx, cancel := s.requestContext(r.Context())
 	defer cancel()
 	if err := session.ForkBranch(ctx, req.ParentBranchID, req.ChildBranchID); err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "fork_failed", err.Error())
 		return
 	}
@@ -277,18 +315,26 @@ func (s *Server) handleBranchFork(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
+	const route = "/v1/session/{id}/replay"
+	s.cfg.Metrics.IncRequest(route)
+	started := time.Now()
+	defer s.cfg.Metrics.ObserveLatency("replay_latency_ms", time.Since(started))
+
 	if r.Method != http.MethodGet {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
 	sessionID, ok := parseReplayPath(r.URL.Path)
 	if !ok {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusNotFound, "not_found", "route not found")
 		return
 	}
 
 	session, err := s.startSession(sessionID, "main")
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "runtime_error", err.Error())
 		return
 	}
@@ -296,6 +342,7 @@ func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	replayed, err := session.ReplaySession(ctx)
 	if err != nil {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusInternalServerError, "replay_failed", err.Error())
 		return
 	}
@@ -313,7 +360,10 @@ func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	const route = "/healthz"
+	s.cfg.Metrics.IncRequest(route)
 	if r.Method != http.MethodGet {
+		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -337,6 +387,17 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	const route = "/metrics"
+	s.cfg.Metrics.IncRequest(route)
+	if r.Method != http.MethodGet {
+		s.cfg.Metrics.IncError(route)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.cfg.Metrics.Snapshot())
+}
+
 func (s *Server) startSession(sessionID, defaultBranchID string) (*runtime.Session, error) {
 	return s.startSessionWithRunner(sessionID, defaultBranchID, s.cfg.ToolRunner)
 }
@@ -349,6 +410,7 @@ func (s *Server) startSessionWithRunner(sessionID, defaultBranchID string, runne
 		ModelAdapter:    s.cfg.ModelAdapter,
 		ToolRunner:      runner,
 		ModelHeaders:    s.cfg.ModelHeaders,
+		Metrics:         s.cfg.Metrics,
 	})
 }
 

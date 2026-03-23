@@ -12,6 +12,7 @@ import (
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/eventlog"
+	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/replay"
 	"pancakes-harness/internal/tools"
@@ -32,6 +33,7 @@ type Config struct {
 	ToolRunner        *tools.Runner
 	ModelHeaders      []assembler.Header
 	MaxReasoningTurns int
+	Metrics           *metrics.Registry
 }
 
 type Session struct {
@@ -42,6 +44,7 @@ type Session struct {
 	toolRunner        *tools.Runner
 	modelHeaders      []assembler.Header
 	maxReasoningTurns int
+	metrics           *metrics.Registry
 
 	mu      sync.Mutex
 	counter int
@@ -81,9 +84,10 @@ func StartSession(cfg Config) (*Session, error) {
 		toolRunner:        cfg.ToolRunner,
 		modelHeaders:      append([]assembler.Header(nil), cfg.ModelHeaders...),
 		maxReasoningTurns: maxTurns,
+		metrics:           cfg.Metrics,
 	}
 
-	events, err := s.backend.ListEventsBySession(context.Background(), s.id)
+	events, err := s.backendListEventsBySession(context.Background(), s.id)
 	if err != nil {
 		return nil, err
 	}
@@ -109,17 +113,22 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 			"text": text,
 		},
 	}
-	if err := s.backend.AppendEvent(ctx, userEvent); err != nil {
+	if err := s.backendAppendEvent(ctx, userEvent); err != nil {
 		return TurnResult{}, err
 	}
 
 	var lastPacketBytes int
 	for i := 0; i < s.maxReasoningTurns; i++ {
+		assembleStarted := time.Now()
 		packet, err := s.assembleForBranch(ctx, branchID)
 		if err != nil {
 			return TurnResult{}, err
 		}
+		s.observeLatency("packet_assembly_ms", time.Since(assembleStarted))
 		lastPacketBytes = packet.Measurement.EnvelopeBytes
+		s.observeEnvelopeBytes(packet.Measurement.EnvelopeBytes)
+		s.observeBodyBytes(len(packet.BodyJSON))
+		s.incCompactionStage(packet.Stage)
 
 		modelEventID := s.nextEventID("response")
 		callReq := model.Request{
@@ -139,11 +148,13 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 				"envelope_bytes": strconv.Itoa(packet.Measurement.EnvelopeBytes),
 			},
 		}
-		if err := s.backend.AppendEvent(ctx, packetSent); err != nil {
+		if err := s.backendAppendEvent(ctx, packetSent); err != nil {
 			return TurnResult{}, err
 		}
 
+		modelStarted := time.Now()
 		callResult, callErr := model.ExecuteAndPersist(ctx, s.backend, s.modelAdapter, callReq, modelEventID, time.Now().UTC())
+		s.observeLatency("model_call_ms", time.Since(modelStarted))
 		if callErr != nil {
 			return TurnResult{
 				SessionID:           s.id,
@@ -164,7 +175,7 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 					"text": callResult.Response.Answer,
 				},
 			}
-			if err := s.backend.AppendEvent(ctx, agent); err != nil {
+			if err := s.backendAppendEvent(ctx, agent); err != nil {
 				return TurnResult{}, err
 			}
 			return TurnResult{
@@ -199,7 +210,7 @@ func (s *Session) ForkBranch(ctx context.Context, parentBranchID, childBranchID 
 	if parentBranchID == "" || childBranchID == "" {
 		return ErrInvalidConfig
 	}
-	parentEvents, err := s.backend.ListEventsByBranch(ctx, s.id, parentBranchID)
+	parentEvents, err := s.backendListEventsByBranch(ctx, s.id, parentBranchID)
 	if err != nil {
 		return err
 	}
@@ -218,11 +229,11 @@ func (s *Session) ForkBranch(ctx context.Context, parentBranchID, childBranchID 
 			"parent_branch_id": parentBranchID,
 		},
 	}
-	return s.backend.AppendEvent(ctx, fork)
+	return s.backendAppendEvent(ctx, fork)
 }
 
 func (s *Session) ReplaySession(ctx context.Context) (ReplayResult, error) {
-	events, err := s.backend.ListEventsBySession(ctx, s.id)
+	events, err := s.backendListEventsBySession(ctx, s.id)
 	if err != nil {
 		return ReplayResult{}, err
 	}
@@ -242,7 +253,7 @@ func (s *Session) ReplaySession(ctx context.Context) (ReplayResult, error) {
 }
 
 func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assembler.Result, error) {
-	branchEvents, err := s.backend.ListEventsByBranch(ctx, s.id, branchID)
+	branchEvents, err := s.backendListEventsByBranch(ctx, s.id, branchID)
 	if err != nil {
 		return assembler.Result{}, err
 	}
@@ -288,7 +299,8 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 				"reason": assembleErr.Error(),
 			},
 		}
-		_ = s.backend.AppendEvent(ctx, rej)
+		s.incPacketBudgetRejection()
+		_ = s.backendAppendEvent(ctx, rej)
 		return assembler.Result{}, ErrPacketBudgetRejected
 	}
 
@@ -303,7 +315,7 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 			"envelope_bytes": strconv.Itoa(packet.Measurement.EnvelopeBytes),
 		},
 	}
-	if err := s.backend.AppendEvent(ctx, candidate); err != nil {
+	if err := s.backendAppendEvent(ctx, candidate); err != nil {
 		return assembler.Result{}, err
 	}
 	return packet, nil
@@ -327,29 +339,31 @@ func (s *Session) executeToolCalls(ctx context.Context, branchID string, calls [
 		}
 
 		treq := tools.ToolRequestEvent(s.nextEventID("tool.request"), s.id, branchID, time.Now().UTC(), req)
-		if err := s.backend.AppendEvent(ctx, treq); err != nil {
+		if err := s.backendAppendEvent(ctx, treq); err != nil {
 			return err
 		}
 
+		toolStarted := time.Now()
 		resp := s.toolRunner.Run(ctx, req)
+		s.observeLatency("tool_call_ms", time.Since(toolStarted))
 		if resp.OK {
 			rawResult, marshalErr := json.Marshal(resp.Result)
 			if marshalErr != nil {
 				rawResult = []byte("{}")
 			}
 			blobRef := fmt.Sprintf("blob://tool/%s/%s", s.id, req.CallID)
-			if err := s.backend.AppendBlob(ctx, blobRef, rawResult); err == nil {
+			if err := s.backendAppendBlob(ctx, blobRef, rawResult); err == nil {
 				resp.Artifacts = append(resp.Artifacts, tools.Artifact{Name: "result", BlobRef: blobRef})
 			}
 			tres := tools.ToolResultEvent(s.nextEventID("tool.result"), s.id, branchID, time.Now().UTC(), req, resp)
-			if err := s.backend.AppendEvent(ctx, tres); err != nil {
+			if err := s.backendAppendEvent(ctx, tres); err != nil {
 				return err
 			}
 			continue
 		}
 
 		tfail := tools.ToolFailureEvent(s.nextEventID("tool.failure"), s.id, branchID, time.Now().UTC(), req, resp)
-		if err := s.backend.AppendEvent(ctx, tfail); err != nil {
+		if err := s.backendAppendEvent(ctx, tfail); err != nil {
 			return err
 		}
 	}
@@ -374,4 +388,68 @@ func readMetaString(meta map[string]any, key string) string {
 		return ""
 	}
 	return v
+}
+
+func (s *Session) backendAppendEvent(ctx context.Context, e eventlog.Event) error {
+	started := time.Now()
+	err := s.backend.AppendEvent(ctx, e)
+	s.observeBackend("append_event_ms", time.Since(started))
+	return err
+}
+
+func (s *Session) backendAppendBlob(ctx context.Context, ref string, payload []byte) error {
+	started := time.Now()
+	err := s.backend.AppendBlob(ctx, ref, payload)
+	s.observeBackend("append_blob_ms", time.Since(started))
+	return err
+}
+
+func (s *Session) backendListEventsBySession(ctx context.Context, sessionID string) ([]eventlog.Event, error) {
+	started := time.Now()
+	events, err := s.backend.ListEventsBySession(ctx, sessionID)
+	s.observeBackend("list_events_by_session_ms", time.Since(started))
+	return events, err
+}
+
+func (s *Session) backendListEventsByBranch(ctx context.Context, sessionID, branchID string) ([]eventlog.Event, error) {
+	started := time.Now()
+	events, err := s.backend.ListEventsByBranch(ctx, sessionID, branchID)
+	s.observeBackend("list_events_by_branch_ms", time.Since(started))
+	return events, err
+}
+
+func (s *Session) observeLatency(name string, d time.Duration) {
+	if s.metrics != nil {
+		s.metrics.ObserveLatency(name, d)
+	}
+}
+
+func (s *Session) observeBackend(name string, d time.Duration) {
+	if s.metrics != nil {
+		s.metrics.ObserveBackendOp(name, d)
+	}
+}
+
+func (s *Session) observeEnvelopeBytes(n int) {
+	if s.metrics != nil {
+		s.metrics.ObserveEnvelopeBytes(n)
+	}
+}
+
+func (s *Session) observeBodyBytes(n int) {
+	if s.metrics != nil {
+		s.metrics.ObserveBodyBytes(n)
+	}
+}
+
+func (s *Session) incCompactionStage(stage int) {
+	if s.metrics != nil {
+		s.metrics.IncCompactionStage(stage)
+	}
+}
+
+func (s *Session) incPacketBudgetRejection() {
+	if s.metrics != nil {
+		s.metrics.IncPacketBudgetRejection()
+	}
 }
