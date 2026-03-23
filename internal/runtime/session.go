@@ -128,15 +128,6 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 			Packet:    packet.BodyJSON,
 		}
 
-		callResult, callErr := model.ExecuteAndPersist(ctx, s.backend, s.modelAdapter, callReq, modelEventID, time.Now().UTC())
-		if callErr != nil {
-			return TurnResult{
-				SessionID:           s.id,
-				BranchID:            branchID,
-				PacketEnvelopeBytes: lastPacketBytes,
-			}, callErr
-		}
-
 		packetSent := eventlog.Event{
 			ID:        s.nextEventID("packet.sent"),
 			SessionID: s.id,
@@ -146,11 +137,19 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 			Meta: map[string]any{
 				"compact_stage":  strconv.Itoa(packet.Stage),
 				"envelope_bytes": strconv.Itoa(packet.Measurement.EnvelopeBytes),
-				"decision":       callResult.Response.Decision,
 			},
 		}
 		if err := s.backend.AppendEvent(ctx, packetSent); err != nil {
 			return TurnResult{}, err
+		}
+
+		callResult, callErr := model.ExecuteAndPersist(ctx, s.backend, s.modelAdapter, callReq, modelEventID, time.Now().UTC())
+		if callErr != nil {
+			return TurnResult{
+				SessionID:           s.id,
+				BranchID:            branchID,
+				PacketEnvelopeBytes: lastPacketBytes,
+			}, callErr
 		}
 
 		switch callResult.Response.Decision {

@@ -275,3 +275,22 @@ The local-first agent harness should therefore preserve:
 - lineage
 
 This makes the system cheaper to refine, easier to explain when broken, and more reusable under changing intent than a design centered on rehydrating full context for every pass.
+
+## 15. Local service surface: serve API and agent ingress
+
+The harness may expose a local HTTP service surface for human turns and inter-agent calls. This surface is not the model boundary. It is an ingress boundary into the local runtime.
+
+Two ingress classes are expected:
+
+- human turn ingress (`/v1/turn`)
+- agent ingress (`/v1/agent-call`)
+
+Both map into the same runtime/session core. Neither should accept raw transcript blobs or raw model packet bodies as the primary contract.
+
+Ingress may remain richer than egress. The harness should reconstruct local context from persisted state and only enforce the strict 14KB constraint at model egress.
+
+This preserves the design goal:
+
+- local state remains canonical
+- cluster callers pass intent + handles
+- the harness owns context reconstruction, packet shaping, and model egress policy

@@ -10,6 +10,7 @@ import (
 
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/tools"
 )
@@ -167,6 +168,142 @@ func TestGetHealthzReflectsBackendHealth(t *testing.T) {
 	}
 }
 
+func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-agent",
+		"branch_id":"main",
+		"task":"Summarize latest result in one sentence",
+		"refs":["branch:head","tool:last"],
+		"constraints":{"reply_style":"brief","max_sentences":1},
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		SessionID string `json:"session_id"`
+		BranchID  string `json:"branch_id"`
+		Decision  string `json:"decision"`
+		Answer    string `json:"answer"`
+		Trace     struct {
+			PacketEventID   string `json:"packet_event_id"`
+			ResponseEventID string `json:"response_event_id"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.SessionID != "s-agent" || out.BranchID != "main" || out.Decision != "answer" || out.Answer == "" {
+		t.Fatalf("unexpected payload: %#v", out)
+	}
+	if out.Trace.PacketEventID == "" || out.Trace.ResponseEventID == "" {
+		t.Fatalf("expected trace ids, got %#v", out.Trace)
+	}
+}
+
+func TestPostAgentCallMalformedRequestReturnsCleanJSON(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{"session_id":"s1","task":12,"allow_tools":false}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Error.Code != "bad_request" || out.Error.Message == "" {
+		t.Fatalf("unexpected error payload: %#v", out)
+	}
+}
+
+func TestPostAgentCallUnknownRefsDoNotCrash(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-refs",
+		"branch_id":"main",
+		"task":"answer normally",
+		"refs":["branch:does-not-exist","tool:unknown"],
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPostAgentCallAllowToolsFalsePreventsToolExecution(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	toolModel := model.MockAdapter{
+		NameValue: "mock-tools",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			return []byte(`{"decision":"tool_calls","tool_calls":[{"tool":"echo_tool","call_id":"c1","args":{"q":"x"}}]}`), nil
+		},
+	}
+	runner := tools.NewRunner(map[string]tools.CommandSpec{
+		"echo_tool": {
+			Path: "sh",
+			Args: []string{"-c", `cat >/dev/null; printf '{"ok":true,"call_id":"c1","result":{"payload":"ran"},"summary":"ran","artifacts":[]}'`},
+		},
+	})
+	srv := newCustomTestServer(t, mem, toolModel, runner)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-no-tools",
+		"branch_id":"main",
+		"task":"do thing",
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Error.Code != "tools_disabled" {
+		t.Fatalf("unexpected error code: %#v", out)
+	}
+	events, err := mem.ListEventsBySession(context.Background(), "s-no-tools")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, e := range events {
+		if e.Kind == eventlog.KindToolRequest || e.Kind == eventlog.KindToolResult || e.Kind == eventlog.KindToolFailure {
+			t.Fatalf("tool events should not exist when allow_tools=false, found %q", e.Kind)
+		}
+	}
+}
+
 func newTestServer(t *testing.T, b backend.Backend) *Server {
 	t.Helper()
 	a := model.MockAdapter{
@@ -175,10 +312,16 @@ func newTestServer(t *testing.T, b backend.Backend) *Server {
 			return []byte(`{"decision":"answer","answer":"hello from server"}`), nil
 		},
 	}
+	srv := newCustomTestServer(t, b, a, tools.NewRunner(nil))
+	return srv
+}
+
+func newCustomTestServer(t *testing.T, b backend.Backend, a model.Adapter, runner *tools.Runner) *Server {
+	t.Helper()
 	srv, err := New(Config{
 		Backend:      b,
 		ModelAdapter: a,
-		ToolRunner:   tools.NewRunner(nil),
+		ToolRunner:   runner,
 		ModelHeaders: []assembler.Header{{Name: "Content-Type", Value: "application/json"}},
 	})
 	if err != nil {

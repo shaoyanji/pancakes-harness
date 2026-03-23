@@ -11,6 +11,7 @@ import (
 
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/tools"
@@ -46,6 +47,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/turn", s.handleTurn)
+	mux.HandleFunc("/v1/agent-call", s.handleAgentCall)
 	mux.HandleFunc("/v1/branch/fork", s.handleBranchFork)
 	mux.HandleFunc("/v1/session/", s.handleSessionReplay)
 	return mux
@@ -63,6 +65,30 @@ type turnResponse struct {
 	Answer        string `json:"answer"`
 	Decision      string `json:"decision"`
 	EnvelopeBytes int    `json:"envelope_bytes"`
+}
+
+type agentCallRequest struct {
+	SessionID   string         `json:"session_id"`
+	BranchID    string         `json:"branch_id"`
+	Task        string         `json:"task"`
+	Refs        []string       `json:"refs,omitempty"`
+	Constraints map[string]any `json:"constraints,omitempty"`
+	AllowTools  bool           `json:"allow_tools"`
+}
+
+type agentCallResponse struct {
+	SessionID     string           `json:"session_id"`
+	BranchID      string           `json:"branch_id"`
+	Decision      string           `json:"decision"`
+	Answer        string           `json:"answer"`
+	ToolCalls     []model.ToolCall `json:"tool_calls"`
+	EnvelopeBytes int              `json:"envelope_bytes"`
+	Trace         agentCallTrace   `json:"trace"`
+}
+
+type agentCallTrace struct {
+	PacketEventID   string `json:"packet_event_id,omitempty"`
+	ResponseEventID string `json:"response_event_id,omitempty"`
 }
 
 type branchForkRequest struct {
@@ -154,6 +180,67 @@ func (s *Server) handleTurn(w http.ResponseWriter, r *http.Request) {
 		Answer:        res.Answer,
 		Decision:      res.Decision,
 		EnvelopeBytes: res.PacketEnvelopeBytes,
+	})
+}
+
+func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	var req agentCallRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.BranchID = strings.TrimSpace(req.BranchID)
+	req.Task = strings.TrimSpace(req.Task)
+	if req.SessionID == "" || req.Task == "" {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", "session_id and task are required")
+		return
+	}
+	branch := req.BranchID
+	if branch == "" {
+		branch = "main"
+	}
+	text, err := buildAgentCallText(req.Task, req.Refs, req.Constraints)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	toolRunner := s.cfg.ToolRunner
+	if !req.AllowTools {
+		toolRunner = nil
+	}
+	session, err := s.startSessionWithRunner(req.SessionID, branch, toolRunner)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "runtime_error", err.Error())
+		return
+	}
+
+	ctx, cancel := s.requestContext(r.Context())
+	defer cancel()
+	res, err := session.HandleUserTurn(ctx, branch, text)
+	if err != nil {
+		if errors.Is(err, runtime.ErrNoToolRunnerConfigured) && !req.AllowTools {
+			writeJSONError(w, http.StatusUnprocessableEntity, "tools_disabled", "model requested tool execution while allow_tools=false")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "agent_call_failed", err.Error())
+		return
+	}
+
+	trace := s.findTrace(req.SessionID, branch)
+	writeJSON(w, http.StatusOK, agentCallResponse{
+		SessionID:     res.SessionID,
+		BranchID:      res.BranchID,
+		Decision:      res.Decision,
+		Answer:        res.Answer,
+		ToolCalls:     []model.ToolCall{},
+		EnvelopeBytes: res.PacketEnvelopeBytes,
+		Trace:         trace,
 	})
 }
 
@@ -251,12 +338,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startSession(sessionID, defaultBranchID string) (*runtime.Session, error) {
+	return s.startSessionWithRunner(sessionID, defaultBranchID, s.cfg.ToolRunner)
+}
+
+func (s *Server) startSessionWithRunner(sessionID, defaultBranchID string, runner *tools.Runner) (*runtime.Session, error) {
 	return runtime.StartSession(runtime.Config{
 		SessionID:       sessionID,
 		DefaultBranchID: defaultBranchID,
 		Backend:         s.cfg.Backend,
 		ModelAdapter:    s.cfg.ModelAdapter,
-		ToolRunner:      s.cfg.ToolRunner,
+		ToolRunner:      runner,
 		ModelHeaders:    s.cfg.ModelHeaders,
 	})
 }
@@ -314,4 +405,54 @@ func writeJSONError(w http.ResponseWriter, status int, code, message string) {
 			Message: message,
 		},
 	})
+}
+
+func buildAgentCallText(task string, refs []string, constraints map[string]any) (string, error) {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return "", errors.New("task is required")
+	}
+	lines := []string{"task: " + task}
+	if len(refs) > 0 {
+		trimmed := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			ref = strings.TrimSpace(ref)
+			if ref == "" {
+				continue
+			}
+			trimmed = append(trimmed, ref)
+		}
+		if len(trimmed) > 0 {
+			lines = append(lines, "refs: "+strings.Join(trimmed, ", "))
+		}
+	}
+	if len(constraints) > 0 {
+		payload, err := json.Marshal(constraints)
+		if err != nil {
+			return "", errors.New("constraints must be valid JSON object")
+		}
+		lines = append(lines, "constraints: "+string(payload))
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func (s *Server) findTrace(sessionID, branchID string) agentCallTrace {
+	events, err := s.cfg.Backend.ListEventsByBranch(context.Background(), sessionID, branchID)
+	if err != nil {
+		return agentCallTrace{}
+	}
+	var trace agentCallTrace
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if trace.PacketEventID == "" && e.Kind == eventlog.KindPacketSent {
+			trace.PacketEventID = e.ID
+		}
+		if trace.ResponseEventID == "" && e.Kind == eventlog.KindResponseReceived {
+			trace.ResponseEventID = e.ID
+		}
+		if trace.PacketEventID != "" && trace.ResponseEventID != "" {
+			break
+		}
+	}
+	return trace
 }

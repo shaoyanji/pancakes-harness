@@ -445,3 +445,60 @@ v0 is done when:
 - tool calls work through the external protocol
 - backend integration is behind a clean adapter boundary
 - the test suite covers the core invariants above
+
+## Post-v0 capability layer — serve API and agent ingress
+
+### Milestone 7 — serve API
+
+Build:
+
+- local HTTP server mode
+- loopback-only bind by default
+- `POST /v1/turn`
+- `POST /v1/branch/fork`
+- `GET /v1/session/{id}/replay`
+- `GET /healthz`
+
+Acceptance:
+
+- local HTTP requests can drive the existing runtime/session core
+- ingress validation is explicit and returns clean JSON errors
+- egress budget enforcement remains in runtime/assembler, not handlers
+
+### Milestone 8 — agent ingress
+
+Build:
+
+- `POST /v1/agent-call`
+- request shape for:
+  - `session_id`
+  - `branch_id`
+  - `task`
+  - optional `refs`
+  - optional `constraints`
+  - optional `allow_tools`
+- response shape for:
+  - `decision`
+  - `answer`
+  - `tool_calls`
+  - `envelope_bytes`
+  - optional trace refs
+
+Acceptance:
+
+- other local agents can call the harness using intent + handles instead of raw transcript blobs
+- unknown refs do not crash the request
+- `allow_tools=false` prevents tool execution
+- ingress can be richer than egress
+- model egress remains budget-checked and compacted deterministically
+
+## Definition of done for serve layer
+
+Serve layer is done when:
+
+- the harness can run as a local HTTP service
+- `/v1/turn` works against the existing runtime
+- `/v1/agent-call` works as a cluster-facing ingress
+- replay and branch operations remain available through the service surface
+- ingress stays decoupled from egress packet format
+- the 14KB limit is enforced only at model egress, not at local ingress

@@ -274,6 +274,53 @@ func TestBackendSwapDoesNotChangeRuntimeBehavior(t *testing.T) {
 	}
 }
 
+func TestPacketSentPersistsBeforeResponseReceived(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	m := model.MockAdapter{
+		NameValue: "mock-order",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			return []byte(`{"decision":"answer","answer":"ok"}`), nil
+		},
+	}
+	s, err := StartSession(Config{
+		SessionID:    "s-trace-order",
+		Backend:      mem,
+		ModelAdapter: m,
+		ToolRunner:   tools.NewRunner(nil),
+	})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	if _, err := s.HandleUserTurn(context.Background(), "main", "hi"); err != nil {
+		t.Fatalf("handle turn: %v", err)
+	}
+
+	events, err := mem.ListEventsBySession(context.Background(), "s-trace-order")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+
+	packetIdx := -1
+	responseIdx := -1
+	for i, e := range events {
+		if packetIdx == -1 && e.Kind == eventlog.KindPacketSent {
+			packetIdx = i
+		}
+		if responseIdx == -1 && e.Kind == eventlog.KindResponseReceived {
+			responseIdx = i
+		}
+	}
+	if packetIdx == -1 || responseIdx == -1 {
+		t.Fatalf("expected packet.sent and response.received, got %#v", kinds(events))
+	}
+	if packetIdx > responseIdx {
+		t.Fatalf("expected packet.sent before response.received, got packet_idx=%d response_idx=%d", packetIdx, responseIdx)
+	}
+}
+
 func containsKind(events []eventlog.Event, kind string) bool {
 	for _, e := range events {
 		if e.Kind == kind {
