@@ -334,7 +334,10 @@ func (s *Session) executeToolCalls(ctx context.Context, branchID string, calls [
 
 		resp := s.toolRunner.Run(ctx, req)
 		if resp.OK {
-			rawResult, _ := json.Marshal(resp.Result)
+			rawResult, marshalErr := json.Marshal(resp.Result)
+			if marshalErr != nil {
+				rawResult = []byte("{}")
+			}
 			blobRef := fmt.Sprintf("blob://tool/%s/%s", s.id, req.CallID)
 			if err := s.backend.AppendBlob(ctx, blobRef, rawResult); err == nil {
 				resp.Artifacts = append(resp.Artifacts, tools.Artifact{Name: "result", BlobRef: blobRef})

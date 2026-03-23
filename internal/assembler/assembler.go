@@ -3,6 +3,7 @@ package assembler
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -20,7 +21,10 @@ func Assemble(req Request) (Result, error) {
 
 	for stage := 0; stage <= 7; stage++ {
 		body.CompactStage = stage
-		bodyJSON, bodyBytes := marshalDeterministicBody(body)
+		bodyJSON, bodyBytes, err := marshalDeterministicBody(body)
+		if err != nil {
+			return Result{}, err
+		}
 		envelopeBytes := requestLineBytes + headerBytes + bodyBytes
 
 		if bodyBytes <= bodyBudget && envelopeBytes <= MaxEnvelopeBytes {
@@ -130,9 +134,12 @@ func measureHeaders(headers []Header) int {
 	return total
 }
 
-func marshalDeterministicBody(body PacketBody) ([]byte, int) {
-	b, _ := json.Marshal(body)
-	return b, len(b)
+func marshalDeterministicBody(body PacketBody) ([]byte, int, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal deterministic body: %w", err)
+	}
+	return b, len(b), nil
 }
 
 func applyCompactionStage(body PacketBody, stage int) PacketBody {
