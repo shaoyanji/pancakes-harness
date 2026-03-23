@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"pancakes-harness/internal/model"
 )
 
 func TestReadPromptFromArgs(t *testing.T) {
@@ -99,5 +101,37 @@ func TestParseConfigUsesEnvDefaults(t *testing.T) {
 	}
 	if prompt != "hello" {
 		t.Fatalf("prompt: got %q", prompt)
+	}
+}
+
+func TestLauncherCanSelectOllamaMode(t *testing.T) {
+	t.Parallel()
+
+	getenv := func(k string) string {
+		switch k {
+		case envModelMode:
+			return "ollama"
+		case envOllamaEndpoint:
+			return "http://127.0.0.1:11434"
+		case envOllamaModel:
+			return "llama3.2"
+		default:
+			return ""
+		}
+	}
+
+	cfg, _, err := parseConfig([]string{"hello"}, strings.NewReader(""), getenv)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if cfg.modelMode != "ollama" {
+		t.Fatalf("model mode: got %q", cfg.modelMode)
+	}
+	a, err := buildAdapter(cfg)
+	if err != nil {
+		t.Fatalf("build adapter: %v", err)
+	}
+	if _, ok := a.(*model.OllamaAdapter); !ok {
+		t.Fatalf("expected ollama adapter, got %T", a)
 	}
 }

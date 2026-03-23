@@ -25,6 +25,8 @@ const (
 	envModelAuthKey    = "HARNESS_MODEL_AUTH_KEY"
 	envModelBearer     = "HARNESS_MODEL_BEARER_TOKEN"
 	envModelTimeout    = "HARNESS_MODEL_TIMEOUT"
+	envOllamaEndpoint  = "HARNESS_OLLAMA_ENDPOINT"
+	envOllamaModel     = "HARNESS_OLLAMA_MODEL"
 	envBackendMode     = "HARNESS_BACKEND_MODE"
 	envSessionID       = "HARNESS_SESSION_ID"
 	envBranchID        = "HARNESS_BRANCH_ID"
@@ -39,11 +41,13 @@ var (
 )
 
 type launcherConfig struct {
-	modelMode     string
-	modelEndpoint string
-	modelTimeout  time.Duration
-	authHeader    string
-	authValue     string
+	modelMode      string
+	modelEndpoint  string
+	modelTimeout   time.Duration
+	ollamaEndpoint string
+	ollamaModel    string
+	authHeader     string
+	authValue      string
 
 	backendMode string
 	xsCommand   string
@@ -125,6 +129,8 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	modelAuthHeaderDefault := stringOrDefault(getenv(envModelAuthHeader), "Authorization")
 	modelAuthKeyDefault := strings.TrimSpace(getenv(envModelAuthKey))
 	modelBearerDefault := strings.TrimSpace(getenv(envModelBearer))
+	ollamaEndpointDefault := stringOrDefault(getenv(envOllamaEndpoint), "http://127.0.0.1:11434")
+	ollamaModelDefault := strings.TrimSpace(getenv(envOllamaModel))
 	backendModeDefault := stringOrDefault(getenv(envBackendMode), "memory")
 	sessionIDDefault := stringOrDefault(getenv(envSessionID), "demo")
 	branchIDDefault := stringOrDefault(getenv(envBranchID), "main")
@@ -138,18 +144,22 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	modelAuthHeader := modelAuthHeaderDefault
 	modelAuthKey := modelAuthKeyDefault
 	modelBearer := modelBearerDefault
+	ollamaEndpoint := ollamaEndpointDefault
+	ollamaModel := ollamaModelDefault
 	modelTimeout := defaultTimeout
 	backendMode := backendModeDefault
 	xsCommand := xsCommandDefault
 	sessionID := sessionIDDefault
 	branchID := branchIDDefault
 
-	fs.StringVar(&modelMode, "model-mode", modelModeDefault, "model adapter mode: mock|http")
+	fs.StringVar(&modelMode, "model-mode", modelModeDefault, "model adapter mode: mock|http|ollama")
 	fs.StringVar(&modelEndpoint, "model-endpoint", modelEndpointDefault, "HTTP model endpoint URL")
 	fs.StringVar(&modelAuthHeader, "model-auth-header", modelAuthHeaderDefault, "HTTP auth header name")
 	fs.StringVar(&modelAuthKey, "model-auth-key", modelAuthKeyDefault, "HTTP auth header value")
 	fs.StringVar(&modelBearer, "model-bearer-token", modelBearerDefault, "HTTP bearer token (sent as Bearer token)")
 	fs.DurationVar(&modelTimeout, "model-timeout", defaultTimeout, "model call timeout (e.g. 10s)")
+	fs.StringVar(&ollamaEndpoint, "ollama-endpoint", ollamaEndpointDefault, "Ollama API base URL")
+	fs.StringVar(&ollamaModel, "ollama-model", ollamaModelDefault, "Ollama model name")
 	fs.StringVar(&backendMode, "backend-mode", backendModeDefault, "backend mode: memory|xs")
 	fs.StringVar(&xsCommand, "xs-command", xsCommandDefault, "xs command path when backend-mode=xs")
 	fs.StringVar(&sessionID, "session-id", sessionIDDefault, "session id")
@@ -170,11 +180,13 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	modelAuthHeader = strings.TrimSpace(modelAuthHeader)
 	modelAuthKey = strings.TrimSpace(modelAuthKey)
 	modelBearer = strings.TrimSpace(modelBearer)
+	ollamaEndpoint = strings.TrimSpace(ollamaEndpoint)
+	ollamaModel = strings.TrimSpace(ollamaModel)
 	xsCommand = strings.TrimSpace(xsCommand)
 	sessionID = strings.TrimSpace(sessionID)
 	branchID = strings.TrimSpace(branchID)
 
-	if modelMode != "mock" && modelMode != "http" {
+	if modelMode != "mock" && modelMode != "http" && modelMode != "ollama" {
 		return launcherConfig{}, "", fmt.Errorf("%w: %q", errUnsupportedModelMode, modelMode)
 	}
 	if backendMode != "memory" && backendMode != "xs" {
@@ -182,6 +194,9 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	}
 	if modelMode == "http" && modelEndpoint == "" {
 		return launcherConfig{}, "", errors.New("model endpoint is required in http mode")
+	}
+	if modelMode == "ollama" && ollamaModel == "" {
+		return launcherConfig{}, "", errors.New("ollama model is required in ollama mode")
 	}
 	if modelBearer != "" && modelAuthKey != "" {
 		return launcherConfig{}, "", errConflictingAuth
@@ -193,15 +208,17 @@ func parseConfig(args []string, stdin io.Reader, getenv func(string) string) (la
 	}
 
 	cfg := launcherConfig{
-		modelMode:     modelMode,
-		modelEndpoint: modelEndpoint,
-		modelTimeout:  modelTimeout,
-		authHeader:    modelAuthHeader,
-		authValue:     authValue,
-		backendMode:   backendMode,
-		xsCommand:     xsCommand,
-		sessionID:     sessionID,
-		branchID:      branchID,
+		modelMode:      modelMode,
+		modelEndpoint:  modelEndpoint,
+		modelTimeout:   modelTimeout,
+		ollamaEndpoint: ollamaEndpoint,
+		ollamaModel:    ollamaModel,
+		authHeader:     modelAuthHeader,
+		authValue:      authValue,
+		backendMode:    backendMode,
+		xsCommand:      xsCommand,
+		sessionID:      sessionID,
+		branchID:       branchID,
 	}
 	return cfg, prompt, nil
 }
@@ -250,6 +267,12 @@ func buildAdapter(cfg launcherConfig) (model.Adapter, error) {
 			APIKey:       cfg.authValue,
 			APIKeyHeader: cfg.authHeader,
 			Timeout:      cfg.modelTimeout,
+		}), nil
+	case "ollama":
+		return model.NewOllamaAdapter(model.OllamaConfig{
+			Endpoint: cfg.ollamaEndpoint,
+			Model:    cfg.ollamaModel,
+			Timeout:  cfg.modelTimeout,
 		}), nil
 	default:
 		return nil, fmt.Errorf("%w: %q", errUnsupportedModelMode, cfg.modelMode)
