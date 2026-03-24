@@ -254,36 +254,48 @@ func (s *Session) ReplaySession(ctx context.Context) (ReplayResult, error) {
 }
 
 func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assembler.Result, error) {
-	branchEvents, err := s.backendListEventsByBranch(ctx, s.id, branchID)
+	sessionEvents, err := s.backendListEventsBySession(ctx, s.id)
 	if err != nil {
 		return assembler.Result{}, err
 	}
 
 	latestUserID := ""
 	latestToolResultID := ""
-	for i := len(branchEvents) - 1; i >= 0; i-- {
-		e := branchEvents[i]
+	nearestCheckpointID := ""
+	for i := len(sessionEvents) - 1; i >= 0; i-- {
+		e := sessionEvents[i]
+		if e.BranchID != branchID {
+			continue
+		}
 		if latestUserID == "" && e.Kind == eventlog.KindTurnUser {
 			latestUserID = e.ID
 		}
 		if latestToolResultID == "" && e.Kind == eventlog.KindToolResult {
 			latestToolResultID = e.ID
 		}
-		if latestUserID != "" && latestToolResultID != "" {
+		if nearestCheckpointID == "" && e.Kind == eventlog.KindSummaryCheckpoint {
+			nearestCheckpointID = e.ID
+		}
+		if latestUserID != "" && latestToolResultID != "" && nearestCheckpointID != "" {
 			break
 		}
 	}
 
-	candidates := make([]egress.Candidate, 0, len(branchEvents))
-	for i, e := range branchEvents {
+	candidates := make([]egress.Candidate, 0, len(sessionEvents))
+	for i, e := range sessionEvents {
+		isActiveBranch := e.BranchID == branchID
 		cand := egress.Candidate{
 			ID:                 e.ID,
 			Kind:               e.Kind,
+			BranchID:           e.BranchID,
+			ActiveBranchID:     branchID,
 			BlobRef:            e.BlobRef,
 			FrontierOrdinal:    i,
-			IsCurrentUserTurn:  e.ID == latestUserID,
-			IsLatestToolResult: e.ID == latestToolResultID,
-			IsCheckpoint:       e.Kind == eventlog.KindSummaryCheckpoint,
+			IsActiveBranch:     isActiveBranch,
+			IsCurrentUserTurn:  isActiveBranch && e.ID == latestUserID,
+			IsLatestToolResult: isActiveBranch && e.ID == latestToolResultID,
+			IsCheckpoint:       isActiveBranch && e.Kind == eventlog.KindSummaryCheckpoint,
+			IsNearestSummary:   isActiveBranch && e.ID == nearestCheckpointID,
 		}
 		switch e.Kind {
 		case eventlog.KindTurnUser, eventlog.KindTurnAgent:
@@ -302,6 +314,9 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 		}
 		if e.Kind == eventlog.KindToolRequest || e.Kind == eventlog.KindToolFailure {
 			cand.IsSensitiveLocal = true
+		}
+		if readMetaString(e.Meta, "global_relevant") == "true" {
+			cand.IsGlobalRelevant = true
 		}
 		candidates = append(candidates, cand)
 	}

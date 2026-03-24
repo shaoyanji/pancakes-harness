@@ -26,6 +26,25 @@ func Select(candidates []Candidate) []Selected {
 		}
 
 		switch {
+		case isNeverEgressKind(c.Kind):
+			sel.Class = ClassDebugNever
+			sel.Include = false
+			sel.Text = ""
+			sel.SummaryRef = ""
+		case !c.IsActiveBranch:
+			if c.IsGlobalRelevant {
+				sel.Class = ClassRefOnly
+				sel.Text = ""
+				if sel.BlobRef == "" {
+					sel.Include = false
+					sel.Class = ClassDropUnlessAsked
+				}
+			} else {
+				sel.Class = ClassDropUnlessAsked
+				sel.Include = false
+				sel.Text = ""
+				sel.SummaryRef = ""
+			}
 		case isDebugNeverKind(c.Kind):
 			sel.Class = ClassDebugNever
 			sel.Include = false
@@ -38,12 +57,21 @@ func Select(candidates []Candidate) []Selected {
 			sel.SummaryRef = ""
 		case c.IsCurrentUserTurn:
 			sel.Class = ClassPassthrough
-		case c.IsLatestToolResult || c.IsCheckpoint:
+		case c.IsLatestToolResult:
 			sel.Class = ClassSummaryOnly
 			sel.Text = ""
 			if sel.SummaryRef == "" {
 				sel.SummaryRef = c.SummaryRef
 			}
+		case c.IsNearestSummary:
+			sel.Class = ClassSummaryOnly
+			sel.Text = ""
+			if sel.SummaryRef == "" {
+				sel.SummaryRef = c.SummaryRef
+			}
+		case c.IsCheckpoint:
+			sel.Class = ClassRefOnly
+			sel.Text = ""
 		case isLargeAndStale(c, latestOrdinal):
 			sel.Class = ClassRefOnly
 			sel.Text = ""
@@ -75,6 +103,20 @@ func isDebugNeverKind(kind string) bool {
 		return true
 	}
 	if strings.Contains(k, "debug") || strings.Contains(k, "metrics") || strings.Contains(k, "trace") {
+		return true
+	}
+	return false
+}
+
+func isNeverEgressKind(kind string) bool {
+	k := strings.TrimSpace(strings.ToLower(kind))
+	if strings.HasPrefix(k, "branch.fork") {
+		return true
+	}
+	if strings.HasPrefix(k, "summary.rebuild") {
+		return true
+	}
+	if strings.HasPrefix(k, "replay.") {
 		return true
 	}
 	return false

@@ -13,14 +13,19 @@ const (
 type Candidate struct {
 	ID              string
 	Kind            string
+	BranchID        string
+	ActiveBranchID  string
 	Text            string
 	SummaryRef      string
 	BlobRef         string
 	FrontierOrdinal int
 
+	IsActiveBranch     bool
+	IsGlobalRelevant   bool
 	IsCurrentUserTurn  bool
 	IsLatestToolResult bool
 	IsCheckpoint       bool
+	IsNearestSummary   bool
 	IsSensitiveLocal   bool
 }
 
