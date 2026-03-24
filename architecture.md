@@ -294,3 +294,17 @@ This preserves the design goal:
 - local state remains canonical
 - cluster callers pass intent + handles
 - the harness owns context reconstruction, packet shaping, and model egress policy
+
+### `/v1/agent-call` ingress contract freeze (current)
+
+`/v1/agent-call` is now treated as a narrow contract boundary with deterministic preflight normalization, stabilized fingerprinting, and coalesced completion semantics.
+
+Current invariants:
+
+- malformed boundary input returns structured `400` JSON (`malformed_boundary_input`).
+- valid unresolved intent is not executed and returns unresolved metadata (`resolved=false`, `missing` populated) without a fabricated consult artifact.
+- resolved intent computes the request fingerprint only after preflight normalization.
+- normalized-equivalent inputs must yield identical fingerprints.
+- concurrent normalized-equivalent requests share one leader execution and every waiter receives the exact leader-completed payload for that fingerprint.
+- resolved responses carry a consult manifest aligned with stabilized identity + normalized intent, with explicit byte accounting.
+- this contract does not alter `/v1/turn` behavior.

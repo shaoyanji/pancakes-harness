@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
@@ -295,13 +298,25 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		SessionID string `json:"session_id"`
-		BranchID  string `json:"branch_id"`
-		Decision  string `json:"decision"`
-		Answer    string `json:"answer"`
-		Trace     struct {
+		SessionID   string `json:"session_id"`
+		BranchID    string `json:"branch_id"`
+		Decision    string `json:"decision"`
+		Answer      string `json:"answer"`
+		Resolved    bool   `json:"resolved"`
+		Fingerprint string `json:"fingerprint"`
+		Trace       struct {
 			PacketEventID   string `json:"packet_event_id"`
 			ResponseEventID string `json:"response_event_id"`
+			ConsultManifest struct {
+				SessionID         string            `json:"session_id"`
+				BranchID          string            `json:"branch_id"`
+				Fingerprint       string            `json:"fingerprint"`
+				Refs              []string          `json:"refs"`
+				Constraints       map[string]string `json:"constraints"`
+				ByteBudget        int               `json:"byte_budget"`
+				ActualBytes       int               `json:"actual_bytes"`
+				SerializerVersion string            `json:"serializer_version"`
+			} `json:"consult_manifest"`
 		} `json:"trace"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -310,8 +325,23 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 	if out.SessionID != "s-agent" || out.BranchID != "main" || out.Decision != "answer" || out.Answer == "" {
 		t.Fatalf("unexpected payload: %#v", out)
 	}
+	if !out.Resolved || out.Fingerprint == "" {
+		t.Fatalf("expected resolved response with fingerprint, got %#v", out)
+	}
 	if out.Trace.PacketEventID == "" || out.Trace.ResponseEventID == "" {
 		t.Fatalf("expected trace ids, got %#v", out.Trace)
+	}
+	if out.Trace.ConsultManifest.SessionID != out.SessionID || out.Trace.ConsultManifest.BranchID != out.BranchID {
+		t.Fatalf("consult manifest identity mismatch: %#v", out.Trace.ConsultManifest)
+	}
+	if out.Trace.ConsultManifest.Fingerprint != out.Fingerprint {
+		t.Fatalf("consult fingerprint mismatch: response=%q manifest=%q", out.Fingerprint, out.Trace.ConsultManifest.Fingerprint)
+	}
+	if out.Trace.ConsultManifest.ActualBytes <= 0 || out.Trace.ConsultManifest.ByteBudget <= 0 {
+		t.Fatalf("consult bytes not populated: %#v", out.Trace.ConsultManifest)
+	}
+	if out.Trace.ConsultManifest.SerializerVersion == "" {
+		t.Fatalf("missing consult serializer version: %#v", out.Trace.ConsultManifest)
 	}
 }
 
@@ -408,6 +438,338 @@ func TestPostAgentCallAllowToolsFalsePreventsToolExecution(t *testing.T) {
 		if e.Kind == eventlog.KindToolRequest || e.Kind == eventlog.KindToolResult || e.Kind == eventlog.KindToolFailure {
 			t.Fatalf("tool events should not exist when allow_tools=false, found %q", e.Kind)
 		}
+	}
+}
+
+func TestPostAgentCallMalformedBoundaryInputReturnsStructuredError(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-malformed-boundary",
+		"branch_id":"main",
+		"task":"do thing",
+		"refs":["ok","   "],
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Error.Code != "malformed_boundary_input" || out.Error.Message == "" {
+		t.Fatalf("unexpected error payload: %#v", out)
+	}
+}
+
+func TestPostAgentCallUnresolvedDoesNotExecute(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	var calls int32
+	a := model.MockAdapter{
+		NameValue: "mock-unresolved",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			atomic.AddInt32(&calls, 1)
+			return []byte(`{"decision":"answer","answer":"should not execute"}`), nil
+		},
+	}
+	srv := newCustomTestServer(t, mem, a, tools.NewRunner(nil))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-unresolved",
+		"task":"do thing",
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Decision string   `json:"decision"`
+		Resolved bool     `json:"resolved"`
+		Missing  []string `json:"missing"`
+		Trace    struct {
+			ConsultManifest any `json:"consult_manifest"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Decision != "unresolved" || out.Resolved {
+		t.Fatalf("unexpected unresolved payload: %#v", out)
+	}
+	if len(out.Missing) != 1 || out.Missing[0] != "scope" {
+		t.Fatalf("expected missing scope, got %#v", out.Missing)
+	}
+	if atomic.LoadInt32(&calls) != 0 {
+		t.Fatalf("expected no model execution, got %d calls", calls)
+	}
+	if out.Trace.ConsultManifest != nil {
+		t.Fatalf("unresolved response must not fabricate consult manifest: %#v", out.Trace)
+	}
+}
+
+func TestPostAgentCallResolvedFingerprintUsesNormalizedIntent(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+
+	call := func(body string) (string, string, int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(body)))
+		srv.Handler().ServeHTTP(rec, req)
+		var out struct {
+			Fingerprint string `json:"fingerprint"`
+			Trace       struct {
+				ConsultManifest json.RawMessage `json:"consult_manifest"`
+			} `json:"trace"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.Fingerprint, string(out.Trace.ConsultManifest), rec.Code
+	}
+
+	fp1, manifest1, code1 := call(`{
+		"session_id":"s-normalize",
+		"branch_id":"main",
+		"task":"  summarize this  ",
+		"refs":["tool:last","branch:head"],
+		"constraints":{"max_sentences":1,"reply_style":"brief"},
+		"allow_tools":false
+	}`)
+	fp2, manifest2, code2 := call(`{
+		"session_id":"s-normalize",
+		"branch_id":"main",
+		"task":"summarize this",
+		"refs":["branch:head","tool:last"],
+		"constraints":{"reply_style":"brief","max_sentences":1},
+		"allow_tools":false
+	}`)
+
+	if code1 != http.StatusOK || code2 != http.StatusOK {
+		t.Fatalf("unexpected statuses: code1=%d code2=%d", code1, code2)
+	}
+	if fp1 == "" || fp2 == "" {
+		t.Fatalf("expected non-empty fingerprints, got %q and %q", fp1, fp2)
+	}
+	if fp1 != fp2 {
+		t.Fatalf("expected equal normalized fingerprints, got %q vs %q", fp1, fp2)
+	}
+	if manifest1 == "" || manifest2 == "" {
+		t.Fatalf("expected consult manifests for resolved requests, got %q and %q", manifest1, manifest2)
+	}
+	if manifest1 != manifest2 {
+		t.Fatalf("expected identical manifests for equivalent normalized requests, got %s vs %s", manifest1, manifest2)
+	}
+}
+
+func TestPostAgentCallCoalescingUsesStabilizedFingerprint(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	var calls int32
+	a := model.MockAdapter{
+		NameValue: "mock-coalesce",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			atomic.AddInt32(&calls, 1)
+			time.Sleep(120 * time.Millisecond)
+			return []byte(`{"decision":"answer","answer":"coalesced"}`), nil
+		},
+	}
+	srv := newCustomTestServer(t, mem, a, tools.NewRunner(nil))
+
+	bodyA := `{
+		"session_id":"s-coalesce",
+		"branch_id":"main",
+		"task":" summarize this ",
+		"refs":["r2","r1"],
+		"constraints":{"a":1,"b":"x"},
+		"allow_tools":false
+	}`
+	bodyB := `{
+		"session_id":"s-coalesce",
+		"branch_id":"main",
+		"task":"summarize this",
+		"refs":["r1","r2"],
+		"constraints":{"b":"x","a":1},
+		"allow_tools":false
+	}`
+
+	type result struct {
+		code int
+		body string
+	}
+	results := make(chan result, 2)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(bodyA)))
+		srv.Handler().ServeHTTP(rec, req)
+		results <- result{code: rec.Code, body: rec.Body.String()}
+	}()
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(bodyB)))
+		srv.Handler().ServeHTTP(rec, req)
+		results <- result{code: rec.Code, body: rec.Body.String()}
+	}()
+	wg.Wait()
+	close(results)
+
+	got := make([]string, 0, 2)
+	for res := range results {
+		if res.code != http.StatusOK {
+			t.Fatalf("unexpected status: %d body=%s", res.code, res.body)
+		}
+		got = append(got, res.body)
+	}
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("expected exactly one model call after coalescing, got %d", calls)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected two responses, got %d", len(got))
+	}
+	if got[0] != got[1] {
+		t.Fatalf("expected identical coalesced payloads, got\n%s\nvs\n%s", got[0], got[1])
+	}
+
+	var out1 struct {
+		Trace struct {
+			ConsultManifest json.RawMessage `json:"consult_manifest"`
+		} `json:"trace"`
+	}
+	var out2 struct {
+		Trace struct {
+			ConsultManifest json.RawMessage `json:"consult_manifest"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal([]byte(got[0]), &out1); err != nil {
+		t.Fatalf("decode coalesced payload 1: %v", err)
+	}
+	if err := json.Unmarshal([]byte(got[1]), &out2); err != nil {
+		t.Fatalf("decode coalesced payload 2: %v", err)
+	}
+	if len(out1.Trace.ConsultManifest) == 0 {
+		t.Fatalf("expected consult manifest on coalesced resolved response: %s", got[0])
+	}
+	if string(out1.Trace.ConsultManifest) != string(out2.Trace.ConsultManifest) {
+		t.Fatalf("expected identical consult manifests for leader/follower, got %s vs %s", string(out1.Trace.ConsultManifest), string(out2.Trace.ConsultManifest))
+	}
+}
+
+func TestPostAgentCallOverlappingDifferentRequestsDoNotCrossBleed(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	var calls int32
+	a := model.MockAdapter{
+		NameValue: "mock-overlap",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			atomic.AddInt32(&calls, 1)
+			time.Sleep(80 * time.Millisecond)
+			packet := string(req.Packet)
+			if strings.Contains(packet, "task: task-a") {
+				return []byte(`{"decision":"answer","answer":"answer-a"}`), nil
+			}
+			if strings.Contains(packet, "task: task-b") {
+				return []byte(`{"decision":"answer","answer":"answer-b"}`), nil
+			}
+			return []byte(`{"decision":"answer","answer":"unknown"}`), nil
+		},
+	}
+	srv := newCustomTestServer(t, mem, a, tools.NewRunner(nil))
+
+	bodyA := `{
+		"session_id":"s-overlap",
+		"branch_id":"main",
+		"task":"task-a",
+		"refs":["shared"],
+		"allow_tools":false
+	}`
+	bodyB := `{
+		"session_id":"s-overlap",
+		"branch_id":"main",
+		"task":"task-b",
+		"refs":["shared"],
+		"allow_tools":false
+	}`
+
+	type result struct {
+		code  int
+		body  string
+		label string
+	}
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(bodyA)))
+		srv.Handler().ServeHTTP(rec, req)
+		results <- result{code: rec.Code, body: rec.Body.String(), label: "a"}
+	}()
+	go func() {
+		defer wg.Done()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(bodyB)))
+		srv.Handler().ServeHTTP(rec, req)
+		results <- result{code: rec.Code, body: rec.Body.String(), label: "b"}
+	}()
+	wg.Wait()
+	close(results)
+
+	seen := map[string]string{}
+	for res := range results {
+		if res.code != http.StatusOK {
+			t.Fatalf("unexpected status for %s: %d body=%s", res.label, res.code, res.body)
+		}
+		var out struct {
+			Answer string `json:"answer"`
+		}
+		if err := json.Unmarshal([]byte(res.body), &out); err != nil {
+			t.Fatalf("decode %s: %v", res.label, err)
+		}
+		seen[res.label] = out.Answer
+	}
+	if atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("expected two model calls for distinct normalized requests, got %d", calls)
+	}
+	if seen["a"] != "answer-a" || seen["b"] != "answer-b" {
+		t.Fatalf("cross-bleed detected, answers=%#v", seen)
+	}
+}
+
+func TestAgentCallPreflightIntegrationDoesNotRegressTurnPath(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/turn", bytes.NewReader([]byte(`{"session_id":"s-turn-regress","branch_id":"main","text":"hello"}`)))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

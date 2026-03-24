@@ -141,29 +141,39 @@ func TestInflightDedupeOneLeaderFollowersWait(t *testing.T) {
 		t.Fatal("expected third caller to be follower")
 	}
 
-	errCh := make(chan error, 2)
+	type waited struct {
+		value any
+		err   error
+	}
+	waitCh := make(chan waited, 2)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		errCh <- follower1.Wait(ctx)
+		v, err := follower1.WaitValue(ctx)
+		waitCh <- waited{value: v, err: err}
 	}()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		errCh <- follower2.Wait(ctx)
+		v, err := follower2.WaitValue(ctx)
+		waitCh <- waited{value: v, err: err}
 	}()
 
 	select {
-	case err := <-errCh:
-		t.Fatalf("follower returned before leader done: %v", err)
+	case got := <-waitCh:
+		t.Fatalf("follower returned before leader done: %#v", got)
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	leader.Done()
+	leader.Complete("ok", nil)
 
 	for i := 0; i < 2; i++ {
-		if err := <-errCh; err != nil {
-			t.Fatalf("follower wait failed: %v", err)
+		got := <-waitCh
+		if got.err != nil {
+			t.Fatalf("follower wait failed: %v", got.err)
+		}
+		if got.value != "ok" {
+			t.Fatalf("expected follower value to match leader completion, got %#v", got.value)
 		}
 	}
 

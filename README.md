@@ -91,6 +91,65 @@ CGO_ENABLED=0 go run ./cmd/harness serve \
   -port 8080
 ```
 
+## Demo CLI (`cmd/demo-cli`)
+
+Small line-oriented demo surface over existing HTTP seams. It does not add runtime logic.
+
+Run:
+
+```bash
+go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main
+```
+
+Commands:
+
+- plain text: sends `/v1/turn` (or `/v1/agent-call` if mode is `agent`)
+- `:agent <text>` -> `/v1/agent-call`
+- `:fork <name>` -> `/v1/branch/fork`
+- `:replay` -> `/v1/session/{id}/replay`
+- `:status`
+- `:mode <turn|agent>`
+- `:quit`
+
+### Demo flow: normal turn
+
+```bash
+go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main <<'EOF'
+hello harness
+:quit
+EOF
+```
+
+### Demo flow: agent-call resolved (compact kernel summary)
+
+```bash
+go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main --mode agent <<'EOF'
+summarize latest state in one sentence
+:quit
+EOF
+```
+
+Example compact agent line:
+
+```text
+[demo/main] agent resolved fp=4fb0d5a1e2c3 consult=yes bytes=640/14336 answer=...
+```
+
+### Demo flow: agent-call unresolved
+
+```bash
+go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id "" --mode agent <<'EOF'
+summarize latest state in one sentence
+:quit
+EOF
+```
+
+Example compact unresolved line:
+
+```text
+[demo/] agent unresolved fp=- consult=no missing=scope
+```
+
 ## HTTP API
 
 ### `POST /v1/turn`
@@ -150,12 +209,37 @@ Response:
   "session_id": "demo",
   "branch_id": "main",
   "decision": "answer",
+  "resolved": true,
+  "fingerprint": "stable-normalized-fingerprint",
+  "reason": "Reply in one brief sentence.",
   "answer": "...",
   "tool_calls": [],
   "envelope_bytes": 225,
   "trace": {
     "packet_event_id": "...",
-    "response_event_id": "..."
+    "response_event_id": "...",
+    "consult_manifest": {
+      "session_id": "demo",
+      "branch_id": "main",
+      "fingerprint": "stable-normalized-fingerprint",
+      "mode": "agent_call",
+      "scope": "main",
+      "refs": ["branch:head", "tool:last"],
+      "constraints": {
+        "max_sentences": "1",
+        "reply_style": "\"brief\""
+      },
+      "selected_items": [
+        { "id": "branch:head", "kind": "ref", "ref": "branch:head", "bytes": 11 },
+        { "id": "tool:last", "kind": "ref", "ref": "tool:last", "bytes": 9 }
+      ],
+      "byte_budget": 14336,
+      "actual_bytes": 640,
+      "compacted": false,
+      "truncated": false,
+      "serializer_version": "consult_manifest.v1",
+      "task_summary": "Reply in one brief sentence."
+    }
   }
 }
 ```
@@ -172,6 +256,16 @@ Notes:
 
 - `refs` are optional hints in v1.
 - `allow_tools=false` blocks tool execution; if the model requests tools, API returns a clean error.
+
+#### Agent-call contract invariants
+
+- malformed boundary input returns structured `400` JSON (`error.code = malformed_boundary_input`).
+- valid unresolved intent returns `200` with `decision = unresolved`, `resolved = false`, populated `missing`, and no fabricated consult artifact.
+- resolved intent computes `fingerprint` from normalized post-preflight intent (not raw request ordering/spacing).
+- normalized-equivalent requests produce identical fingerprints.
+- concurrent normalized-equivalent requests coalesce to one execution; all waiters receive the exact same completed payload bytes.
+- resolved responses include a consult manifest aligned to stabilized identity/normalized intent (`session_id`, `branch_id`, `fingerprint`, `mode`, `scope`, `refs`, `constraints`) with explicit byte accounting (`byte_budget`, `actual_bytes`).
+- `/v1/turn` contract remains unaffected by `/v1/agent-call` ingress/coalescing behavior.
 
 ## Metrics
 
