@@ -1,327 +1,133 @@
-Yes — here’s a README draft aimed at **operators and agents in your fleet**, not marketing.
-
-You can paste this as `README.md` and trim names/paths as needed.
-
-````md
 # pancakes-harness
 
-Local-first context harness for LLM and agent workflows.
+Local-first context and egress harness for agent/model workflows.
 
-This repo is **not** a full agent shell. It is the **context plane** and **model egress gate** that other agents can rely on.
+This repository provides a thin core that:
 
-Its job is to:
+- persists session/branch state locally
+- rebuilds context from local state
+- assembles model-bound packets under a strict envelope budget
+- exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
 
-- persist local session and branch state
-- reconstruct context from local state
-- assemble compact model-bound packets
-- enforce a strict egress envelope limit
-- expose a thin local API for turns and agent calls
-- keep backend/model/tool boundaries swappable
+This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
-Its job is **not** to own high-level tool policy, approvals, sandboxing, bwrap rules, or agent-specific execution controls. Those belong at the **agent layer above the harness**.
+## What This Is
 
----
+- Context broker for local agents/users.
+- Model egress gateway with deterministic packet assembly and budget enforcement.
+- Replayable local event graph with branch support.
+- Swappable backend/model/tool boundaries.
 
-## Why this exists
+## What This Is Not
 
-Large agent systems often fail at the boundary between:
+- Full autonomous agent policy/control plane.
+- Transcript-forwarding layer that ships full conversation history by default.
+- Distributed scheduler or fleet coordinator.
+- Heavy observability stack.
 
-- rich local context
-- constrained model calls
-- reusable replayable state
-- cluster-local agent coordination
+## Architectural Invariants
 
-This harness exists so agents in the fleet do **not** have to improvise their own egress shaping, prompt packing, replay logic, or transcript shipping.
+- Locally stateful, remotely stateless.
+- Outbound model request budget is hard-capped at 14,336 bytes (request line + headers + body).
+- Source of truth is local event/branch graph, not provider context window.
+- Branches are pointer-based (not transcript copies).
+- Packet assembly/compaction is deterministic.
+- No silent truncation.
+- Tools are external to core harness.
 
-The design goal is:
+## Quick Start
 
-> local ingress may be rich; model egress must stay constrained.
-
-The harness should be the one place that:
-
-- reconstructs local context
-- applies packet compaction
-- enforces the model egress budget
-- persists results back to local state
-
-That keeps policy tinkering and prompt bloat out of individual agents.
-
----
-
-## Core mental model
-
-Treat the system as two layers:
-
-### Harness layer = context plane
-
-Responsible for:
-
-- session state
-- branch state
-- replay
-- summaries/checkpoints
-- packet assembly
-- strict model egress budget enforcement
-- local service surface
-
-### Agent layer = execution / control plane
-
-Responsible for:
-
-- tool policy
-- sandboxing / bwrap
-- approval rules
-- retry/escalation
-- capability gating
-- orchestration strategy
-- safety controls
-
-Do **not** collapse these layers without a very good reason.
-
----
-
-## Current status
-
-This repo currently supports:
-
-- local session runtime
-- branch fork + replay
-- deterministic packet assembly with hard envelope cap
-- tool subprocess protocol
-- swappable backend
-- swappable model adapters
-- local `serve` API
-- local Ollama integration
-- xs-backed persistence
-- cluster-facing `/v1/agent-call`
-
-Known-good local demo path:
-
-- Ollama
-- `qwen3:0.6b`
-- memory backend or xs backend
-
----
-
-## Non-goals
-
-This repo is intentionally **not**:
-
-- a policy-heavy agent shell
-- a general workflow engine
-- a scheduler/orchestrator for the whole fleet
-- the place to embed bwrap rules and per-agent safety logic
-- the place to ship full transcript blobs between agents
-
-If you are about to add:
-
-- approval systems
-- sandbox policy
-- browser automation policy
-- capability escalation logic
-- cluster-wide scheduling
-
-that probably belongs **outside** this repo.
-
----
-
-## Architectural invariants
-
-These are the rules to preserve.
-
-### 1. Local state is canonical
-
-Conversation/tool/branch state lives locally, not in remote model context.
-
-### 2. Model calls are stateless
-
-The model sees only the compact packet built for the current turn.
-
-### 3. Egress is constrained
-
-Model-bound packets are measured and compacted before send. The strict cap is enforced at model egress.
-
-### 4. Ingress is not egress
-
-Human turns and agent ingress requests are **not** raw model packets.
-
-### 5. The harness owns context reconstruction
-
-Agents should pass intent + handles + refs, not full transcript history.
-
-### 6. The harness is thin
-
-Do not move high-level agent execution policy into this layer.
-
-### 7. Boundaries matter
-
-Keep backend, model, tool, and runtime concerns separated.
-
----
-
-## Repo layout
-
-The exact file tree may evolve, but the important packages are:
-
-- `internal/runtime` — session orchestration and turn loop
-- `internal/replay` — rebuild/replay from persisted events
-- `internal/branchdag` — branch state and fork behavior
-- `internal/summaries` — checkpoint summaries
-- `internal/assembler` — packet assembly, measurement, compaction
-- `internal/tools` — subprocess tool protocol
-- `internal/backend` — backend interface + memory backend
-- `internal/backend/xs` — xs adapter
-- `internal/model` — model interface + adapters
-- `internal/server` — local HTTP API
-- `cmd/harness` — CLI entrypoint and `serve` mode
-
-Treat these as boundaries, not suggestions.
-
----
-
-## How to think about packet flow
-
-There are three distinct packet types.
-
-### 1. Ingress request
-
-What a human or another agent sends to the harness.
-
-Examples:
-
-- `/v1/turn`
-- `/v1/agent-call`
-
-These are requests **to the harness**, not model packets.
-
-### 2. Internal context packet
-
-Built by the runtime from session state, branch state, replay state, summaries, and refs.
-
-This is the harness’ working representation.
-
-### 3. Egress packet
-
-The actual model-bound packet.
-
-This is the one that must be:
-
-- compact
-- measured
-- deterministic
-- budget-enforced
-
-Keep these three distinct.
-
----
-
-## Quick start
-
-### 1. Mock mode
+### 1) Mock (one-shot)
 
 ```bash
-CGO_ENABLED=0 go run ./cmd/harness "hello harness"
+CGO_ENABLED=0 go run ./cmd/harness -model-mode mock "hello harness"
 ```
-````
 
-### 2. Ollama + memory backend
+### 2) Ollama + memory backend (one-shot)
 
-Start Ollama:
+Start Ollama and pull a model:
 
 ```bash
 ollama serve
 ollama pull qwen3:0.6b
 ```
 
-Set `.env.local`:
+Run harness:
 
 ```bash
-HARNESS_MODEL_MODE=ollama
-HARNESS_BACKEND_MODE=memory
-HARNESS_SESSION_ID=demo
-HARNESS_BRANCH_ID=main
-HARNESS_OLLAMA_ENDPOINT=http://127.0.0.1:11434
-HARNESS_OLLAMA_MODEL=qwen3:0.6b
-HARNESS_MODEL_TIMEOUT=120s
-HARNESS_XS_COMMAND=xs
+CGO_ENABLED=0 go run ./cmd/harness \
+  -model-mode ollama \
+  -ollama-endpoint http://127.0.0.1:11434 \
+  -ollama-model qwen3:0.6b \
+  -backend-mode memory \
+  -session-id demo \
+  -branch-id main \
+  "hello harness"
 ```
 
-Run:
+### 3) Ollama + xs backend (one-shot)
 
 ```bash
-CGO_ENABLED=0 ./run-demo.sh "hello harness"
+CGO_ENABLED=0 go run ./cmd/harness \
+  -model-mode ollama \
+  -ollama-endpoint http://127.0.0.1:11434 \
+  -ollama-model qwen3:0.6b \
+  -backend-mode xs \
+  -xs-command xs \
+  -session-id demo \
+  -branch-id main \
+  "hello harness"
 ```
 
-### 3. Ollama + xs backend
-
-Make sure `xs` is available and use the same `.env.local`, but with:
-
-```bash
-HARNESS_BACKEND_MODE=xs
-```
-
-Then:
-
-```bash
-CGO_ENABLED=0 ./run-xs-demo.sh "hello persistent harness"
-```
-
----
-
-## Serve mode
-
-Run the local HTTP service:
+### 4) Serve mode
 
 ```bash
 CGO_ENABLED=0 go run ./cmd/harness serve \
   -model-mode ollama \
   -ollama-endpoint http://127.0.0.1:11434 \
   -ollama-model qwen3:0.6b \
+  -backend-mode memory \
   -bind 127.0.0.1 \
-  -port 18081
+  -port 8080
 ```
 
-### Health
+## HTTP API
 
-```bash
-curl -sS http://127.0.0.1:18081/healthz
+### `POST /v1/turn`
+
+Request:
+
+```json
+{
+  "session_id": "demo",
+  "branch_id": "main",
+  "text": "hello harness"
+}
 ```
 
-### Turn API
+Response:
+
+```json
+{
+  "session_id": "demo",
+  "branch_id": "main",
+  "answer": "demo response",
+  "decision": "answer",
+  "envelope_bytes": 225
+}
+```
+
+Example:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:18081/v1/turn \
+curl -sS -X POST http://127.0.0.1:8080/v1/turn \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"demo","branch_id":"main","text":"hello harness"}'
 ```
 
-### Branch fork
+### `POST /v1/agent-call`
 
-```bash
-curl -sS -X POST http://127.0.0.1:18081/v1/branch/fork \
-  -H 'Content-Type: application/json' \
-  -d '{"session_id":"demo","parent_branch_id":"main","child_branch_id":"alt-1"}'
-```
-
-### Replay
-
-```bash
-curl -sS http://127.0.0.1:18081/v1/session/demo/replay
-```
-
----
-
-## Cluster-facing agent ingress
-
-The harness exposes:
-
-```http
-POST /v1/agent-call
-```
-
-This is for other local agents in the fleet.
-
-### Request shape
+Request:
 
 ```json
 {
@@ -337,7 +143,7 @@ This is for other local agents in the fleet.
 }
 ```
 
-### Response shape
+Response:
 
 ```json
 {
@@ -354,316 +160,135 @@ This is for other local agents in the fleet.
 }
 ```
 
-### Important rules for fleet agents
-
-Other agents should **not** send:
-
-- full transcript history
-- giant raw JSON context blobs
-- raw model packet bodies
-
-Other agents **should** send:
-
-- session handle
-- branch handle
-- current task
-- optional refs
-- optional constraints
-
-The harness will reconstruct context locally and enforce model egress constraints.
-
----
-
-## Backend modes
-
-### `memory`
-
-Good for:
-
-- tests
-- smoke runs
-- non-persistent demos
-
-### `xs`
-
-Good for:
-
-- persistent local state
-- branch replay across runs
-- service mode
-- cluster-local harness behavior
-
-When using xs, the harness still owns packet shaping and egress policy. xs is backing state, not a substitute for the runtime.
-
----
-
-## Model modes
-
-### `mock`
-
-Use for:
-
-- deterministic tests
-- no-network runs
-- behavior debugging
-
-### `http`
-
-Generic thin HTTP slot. Use only if you know the adapter/request shape is compatible with your provider.
-
-### `ollama`
-
-Known-good local path.
-
-Recommended default for local runs:
-
-- `qwen3:0.6b`
-
-Treat other models as opt-in until validated against the harness’ structured response expectations.
-
----
-
-## Tool model
-
-The harness supports a thin subprocess protocol for tools.
-
-That does **not** mean the harness should become the final tool policy authority.
-
-Keep these separate:
-
-### Harness tool support
-
-- subprocess request/response schema
-- timeout handling
-- normalized tool result/failure events
-- persistence-friendly storage
-
-### Agent-layer tool control
-
-- whether a tool may run
-- sandboxing
-- bwrap / jails
-- approvals
-- network / file access policy
-- escalation
-
-If you need tool safety policy, put it above the harness.
-
----
-
-## For maintainers and agents in the fleet
-
-Before changing anything, ask:
-
-### Am I changing the context plane or the execution plane?
-
-If it is:
-
-- replay
-- branch state
-- packet shaping
-- egress budget
-- local ingress API
-- backend/model/tool boundaries
-
-then it may belong here.
-
-If it is:
-
-- approval policy
-- sandboxing
-- capability gating
-- safety/policy logic
-- orchestration heuristics
-- cluster scheduling
-
-then it probably belongs in an agent layer above this repo.
-
-### Am I widening ingress or polluting egress?
-
-Ingress may be rich.
-
-Egress must stay:
-
-- compact
-- measured
-- deterministic
-- model-oriented
-
-### Am I preserving the boundaries?
-
-Do not:
-
-- move provider-specific logic into runtime
-- move backend-specific logic into runtime
-- move orchestration policy into server handlers
-- let agents bypass the harness by shipping raw transcript blobs
-
----
-
-## Testing
-
-Run the full suite:
+Example:
 
 ```bash
-go test ./...
+curl -sS -X POST http://127.0.0.1:8080/v1/agent-call \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"demo","branch_id":"main","task":"Reply in one brief sentence.","refs":["branch:head"],"constraints":{"reply_style":"brief","max_sentences":1},"allow_tools":false}'
 ```
 
-Useful focused runs:
+Notes:
+
+- `refs` are optional hints in v1.
+- `allow_tools=false` blocks tool execution; if the model requests tools, API returns a clean error.
+
+## Metrics
+
+`GET /metrics` returns local JSON metrics (no Prometheus dependency).
+
+Example:
 
 ```bash
-go test ./internal/runtime
-go test ./internal/server
-go test ./internal/model
-go test ./internal/assembler
+curl -sS http://127.0.0.1:8080/metrics
 ```
 
-On systems without a C toolchain:
+Typical fields include:
+
+- `requests_total` by route
+- `errors_total` by route
+- `packet_budget_rejections_total`
+- `compaction_stage_counts`
+- latencies (`turn`, `agent_call`, `model_call`, `replay`, `tool_call`, `packet_assembly`)
+- `envelope_bytes`, `body_bytes`
+- `backend_mode`, `model_mode`
+
+## Benchmark Scripts
+
+### `scripts/benchmark_compare.sh`
+
+Simple latency comparison:
+
+- direct Ollama API call
+- harness `/v1/turn`
+- harness `/v1/agent-call`
+
+Run:
 
 ```bash
-CGO_ENABLED=0 go test ./...
+N=3 \
+OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
+OLLAMA_MODEL=qwen3:0.6b \
+HARNESS_URL=http://127.0.0.1:8080 \
+./scripts/benchmark_compare.sh
 ```
 
----
+### `scripts/benchmark_context_growth.sh`
+
+Context-growth benchmark for scenarios (`linear`, `noisy`, `tool_heavy`, optional `branched`):
+
+- direct naive full-context Ollama baseline
+- harness `/v1/turn`
+- harness `/v1/agent-call`
+
+Outputs CSV with latency, envelope bytes (harness), direct request body bytes, output text, correctness, and compaction-stage hints.
+
+Run:
+
+```bash
+HARNESS_URL=http://127.0.0.1:8080 \
+OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
+OLLAMA_MODEL=qwen3:0.6b \
+SCENARIOS="linear noisy tool_heavy branched" \
+SIZES="4 8 16" \
+RUNS=1 \
+OUTPUT_FILE=/tmp/context_growth.csv \
+./scripts/benchmark_context_growth.sh
+```
 
 ## Troubleshooting
 
-### `cgo: C compiler "gcc" not found`
+### `CGO_ENABLED=0`
 
-Use:
-
-```bash
-CGO_ENABLED=0 go run ./cmd/harness "hello harness"
-```
-
-### Ollama timeout
-
-Check:
-
-- `ollama serve` is running
-- the model is pulled
-- timeout is long enough
-- the configured model is the same one you tested manually
-
-Known-good warmup:
+If your environment/toolchain is inconsistent, use:
 
 ```bash
-ollama run qwen3:0.6b "hello"
+CGO_ENABLED=0 go run ./cmd/harness ...
 ```
 
-### `malformed model response`
+This often avoids local linker/cgo friction for operator demos.
 
-Usually means the adapter got bytes back that did not match the required structured response shape.
+### Ollama timeouts
 
-Check:
+- Increase `HARNESS_MODEL_TIMEOUT` (or `-model-timeout`) for slower local models.
+- Keep model warm (`ollama serve` running; benchmark warmup enabled).
+- Reduce scenario sizes in benchmark scripts (`SIZES`, `RUNS`) if host is constrained.
 
-- model choice
-- adapter prompt/schema behavior
-- whether the model is adding prose around JSON
+### Malformed model response
 
-### HTTP 404 / connection refused
+If adapter output is not valid internal schema JSON, runtime will reject it cleanly (e.g. malformed/invalid-schema paths). Verify:
 
-Usually means:
+- adapter mode and endpoint/model are correct
+- Ollama model is compatible with strict JSON output requirements
+- no proxy/middleware is rewriting response payload
 
-- wrong endpoint path
-- server not running
-- wrong mode or wrong env var
+## Known-Good Baseline Config
 
----
+Minimal reliable baseline for local operators:
 
-## Known good local baseline
+- model: Ollama `qwen3:0.6b`
+- backend: `memory` for quick tests, `xs` for backend-integration checks
+- serve bind: `127.0.0.1`
+- timeout: `120s` for local CPU-only setups
 
-Use this when debugging before trying anything fancier:
+Example environment (see `.env.example`):
 
-- backend: `memory`
-- model mode: `ollama`
-- model: `qwen3:0.6b`
-- local bind: `127.0.0.1`
-- `CGO_ENABLED=0`
+```bash
+HARNESS_MODEL_MODE=ollama
+HARNESS_OLLAMA_ENDPOINT=http://127.0.0.1:11434
+HARNESS_OLLAMA_MODEL=qwen3:0.6b
+HARNESS_BACKEND_MODE=memory
+HARNESS_MODEL_TIMEOUT=120s
+HARNESS_SERVE_BIND=127.0.0.1
+HARNESS_SERVE_PORT=8080
+```
 
-If that path breaks, fix it before debugging cluster-specific behavior.
+## Operator Guidance
 
----
+Treat this repo as a thin context/egress harness:
 
-## Extension points
+- pass intent + handles/refs into harness APIs
+- let runtime reconstruct and compact context locally
+- keep high-level agent policy and orchestration outside this repo
 
-Safe places to extend next:
-
-- interactive `chat` / REPL mode
-- richer `/v1/agent-call` constraints
-- optional egress serializers (`json | toon | auto`)
-- better trace semantics
-- improved replay inspection
-- more model adapters
-
-Dangerous places to extend casually:
-
-- runtime/session god-object growth
-- policy logic in handlers
-- provider-specific hacks in core runtime
-- backend-specific assumptions outside adapters
-- letting ingress become “ship me your whole transcript”
-
----
-
-## Suggested workflow for fleet agents
-
-When building on this harness:
-
-1. keep the harness thin
-2. use `/v1/agent-call` for context-broker behavior
-3. let the harness reconstruct context locally
-4. let the harness enforce model egress size
-5. keep tool/sandbox/approval policy in your own agent layer
-6. do not patch around harness egress failures by inflating payloads upstream
-
-If your agent needs more context, improve:
-
-- refs
-- summaries
-- branch usage
-- egress serialization
-
-Do **not** bypass the harness by sending larger raw context blobs.
-
-## Benchmarking:
-
-- Start server:
-
-GOCACHE=/tmp/go-build go run ./cmd/harness serve -model-mode ollama -ollama-model qwen3:0.6b
--bind 127.0.0.1 -port 18083
-
-- Query metrics:
-
-curl -sS http://127.0.0.1:18083/metrics
-
-Direct-vs-harness comparison commands
-
-- Benchmark script command used:
-
-N=2 OLLAMA_MODEL=qwen3:0.6b OLLAMA_ENDPOINT=http://127.0.0.1:11434
-HARNESS_URL=http://127.0.0.1:18083 ./scripts/benchmark_compare.sh
-
-- Output observed:
-
-Benchmark comparison (N=2)
-direct_ollama_api_chat avg=2039ms max=3122ms n=2
-harness_v1_turn avg= 368ms max= 397ms n=2
-harness_v1_agent_call avg= 429ms max= 463ms n=2
-
-- the harness overhead appears low, and in this test the constrained harness path returned faster than the direct baseline.
-
----
-
-## Final note
-
-This repo is meant to stay boring in the right places.
-
-If you are adding cleverness, make sure it is in service of:
-
-- replayability
-- local explainability
-- bounded model egress
-- reusable context handling
-
-and not just another layer of policy tinkering at the model boundary.
+This separation is the main maintenance advantage for fleet operations.
