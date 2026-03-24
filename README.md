@@ -236,6 +236,69 @@ OUTPUT_FILE=/tmp/context_growth.csv \
 ./scripts/benchmark_context_growth.sh
 ```
 
+### `scripts/benchmark_context_growth_reduced.sh`
+
+Reduced matrix helper for repeatable larger runs:
+
+- scenarios: `branched tool_heavy noisy`
+- sizes: `16 32 64 128`
+
+Run:
+
+```bash
+HARNESS_URL=http://127.0.0.1:8080 \
+OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
+OLLAMA_MODEL=qwen3:0.6b \
+RUNS=1 \
+OUTPUT_FILE=/tmp/context_growth_reduced.csv \
+./scripts/benchmark_context_growth_reduced.sh
+```
+
+### `scripts/benchmark_report.sh`
+
+Post-processes context-growth CSV output into a markdown report with:
+
+- per scenario/size/path median latency
+- timeout counts
+- loose and strict correctness pass rates
+- average/max envelope bytes
+- average/max request body bytes
+- dominant compaction stage
+- anomaly counts (extra-text, non-ASCII, possible language drift)
+
+Run:
+
+```bash
+./scripts/benchmark_report.sh /tmp/context_growth.csv /tmp/context_growth_report.md
+```
+
+Or print to stdout only:
+
+```bash
+./scripts/benchmark_report.sh /tmp/context_growth.csv
+```
+
+## Benchmark Methodology
+
+- Warm model once before timing.
+- For each scenario/size, build synthetic history before measured calls.
+- Compare three paths:
+  - direct naive full-context call to Ollama
+  - harness `/v1/turn`
+  - harness `/v1/agent-call`
+- Evaluate correctness via benchmark token checks:
+  - loose correctness: token present / reported pass
+  - strict correctness: exact expected token only
+- Collect latency, egress envelope bytes (harness), direct request body bytes, and compaction-stage hints.
+
+## Benchmark Caveats And Interpretation
+
+- Direct baseline and harness are intentionally different egress strategies; absolute latency alone is insufficient.
+- Strict correctness is the stronger signal for instruction adherence; loose correctness can mask extra-text behavior.
+- Timeout spikes can dominate medians at low run counts; use larger `RUNS` for stable comparisons.
+- Non-ASCII and language-drift anomaly flags are heuristics for operator review, not definitive model-quality judgments.
+- Compaction stage dominance helps identify when context growth starts forcing aggressive egress reduction.
+
 ## Troubleshooting
 
 ### `CGO_ENABLED=0`
