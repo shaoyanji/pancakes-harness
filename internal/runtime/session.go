@@ -11,6 +11,7 @@ import (
 
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/egress"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
@@ -257,23 +258,67 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 	if err != nil {
 		return assembler.Result{}, err
 	}
-	working := make([]assembler.WorkingItem, 0, len(branchEvents))
+
+	latestUserID := ""
+	latestToolResultID := ""
+	for i := len(branchEvents) - 1; i >= 0; i-- {
+		e := branchEvents[i]
+		if latestUserID == "" && e.Kind == eventlog.KindTurnUser {
+			latestUserID = e.ID
+		}
+		if latestToolResultID == "" && e.Kind == eventlog.KindToolResult {
+			latestToolResultID = e.ID
+		}
+		if latestUserID != "" && latestToolResultID != "" {
+			break
+		}
+	}
+
+	candidates := make([]egress.Candidate, 0, len(branchEvents))
 	for i, e := range branchEvents {
-		item := assembler.WorkingItem{
-			ID:              e.ID,
-			Kind:            e.Kind,
-			FrontierOrdinal: i,
-			BlobRef:         e.BlobRef,
+		cand := egress.Candidate{
+			ID:                 e.ID,
+			Kind:               e.Kind,
+			BlobRef:            e.BlobRef,
+			FrontierOrdinal:    i,
+			IsCurrentUserTurn:  e.ID == latestUserID,
+			IsLatestToolResult: e.ID == latestToolResultID,
+			IsCheckpoint:       e.Kind == eventlog.KindSummaryCheckpoint,
 		}
 		switch e.Kind {
 		case eventlog.KindTurnUser, eventlog.KindTurnAgent:
-			item.Text = readMetaString(e.Meta, "text")
+			cand.Text = readMetaString(e.Meta, "text")
 		case eventlog.KindToolResult:
-			item.Text = readMetaString(e.Meta, "summary")
+			cand.Text = readMetaString(e.Meta, "summary")
 			callID := readMetaString(e.Meta, "call_id")
 			if callID != "" {
-				item.SummaryRef = "summary://tool/" + callID
+				cand.SummaryRef = "summary://tool/" + callID
 			}
+		case eventlog.KindSummaryCheckpoint:
+			summaryID := readMetaString(e.Meta, "summary_id")
+			if summaryID != "" {
+				cand.SummaryRef = "summary://checkpoint/" + summaryID
+			}
+		}
+		if e.Kind == eventlog.KindToolRequest || e.Kind == eventlog.KindToolFailure {
+			cand.IsSensitiveLocal = true
+		}
+		candidates = append(candidates, cand)
+	}
+
+	selected := egress.Select(candidates)
+	working := make([]assembler.WorkingItem, 0, len(selected))
+	for _, sel := range selected {
+		if !sel.Include {
+			continue
+		}
+		item := assembler.WorkingItem{
+			ID:              sel.ID,
+			Kind:            sel.Kind,
+			Text:            sel.Text,
+			SummaryRef:      sel.SummaryRef,
+			BlobRef:         sel.BlobRef,
+			FrontierOrdinal: sel.FrontierOrdinal,
 		}
 		working = append(working, item)
 	}
