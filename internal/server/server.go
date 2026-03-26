@@ -83,12 +83,13 @@ type turnResponse struct {
 }
 
 type agentCallRequest struct {
-	SessionID   string         `json:"session_id"`
-	BranchID    string         `json:"branch_id"`
-	Task        string         `json:"task"`
-	Refs        []string       `json:"refs,omitempty"`
-	Constraints map[string]any `json:"constraints,omitempty"`
-	AllowTools  bool           `json:"allow_tools"`
+	SessionID       string         `json:"session_id"`
+	BranchID        string         `json:"branch_id"`
+	Task            string         `json:"task"`
+	Refs            []string       `json:"refs,omitempty"`
+	Constraints     map[string]any `json:"constraints,omitempty"`
+	AllowTools      bool           `json:"allow_tools"`
+	ExternalContext string         `json:"external_context,omitempty"`
 }
 
 type agentCallResponse struct {
@@ -297,19 +298,22 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fingerprint, err := ingressctrl.Fingerprint(ingressctrl.FingerprintInput{
-		SessionID:   req.SessionID,
-		BranchID:    branch,
-		Task:        task,
-		Refs:        pfResult.Refs,
-		Constraints: pfResult.Constraints,
-		AllowTools:  pfResult.AllowTools,
-	})
+	ingressReq := ingressctrl.Request{
+		SessionID:       req.SessionID,
+		BranchID:        branch,
+		Task:            task,
+		Refs:            pfResult.Refs,
+		Constraints:     pfResult.Constraints,
+		AllowTools:      pfResult.AllowTools,
+		ExternalContext: req.ExternalContext,
+	}
+	fingerprint, err := ingressctrl.FingerprintRequest(ingressReq)
 	if err != nil {
 		s.cfg.Metrics.IncError(route)
 		writeJSONError(w, http.StatusBadRequest, "malformed_boundary_input", "unable to fingerprint request")
 		return
 	}
+	externalContext := ingressReq.NormalizedExternalContext()
 	manifest, err := buildConsultManifest(req.SessionID, branch, fingerprint, pfResult, task)
 	if err != nil {
 		s.cfg.Metrics.IncError(route)
@@ -359,7 +363,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := s.requestContext(r.Context())
 	defer cancel()
-	res, err := session.HandleUserTurn(ctx, branch, text)
+	res, err := session.HandleUserTurnWithExternalContext(ctx, branch, text, externalContext)
 	if err != nil {
 		if errors.Is(err, runtime.ErrNoToolRunnerConfigured) && !pfResult.AllowTools {
 			s.cfg.Metrics.IncError(route)

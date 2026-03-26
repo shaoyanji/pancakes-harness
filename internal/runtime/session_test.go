@@ -321,6 +321,61 @@ func TestPacketSentPersistsBeforeResponseReceived(t *testing.T) {
 	}
 }
 
+func TestExternalContextStatusRecordedInPacketEvents(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	m := model.MockAdapter{
+		NameValue: "mock-ext",
+		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
+			return []byte(`{"decision":"answer","answer":"ok"}`), nil
+		},
+	}
+	s, err := StartSession(Config{
+		SessionID:    "s-ext-status",
+		Backend:      mem,
+		ModelAdapter: m,
+		ToolRunner:   tools.NewRunner(nil),
+		ModelHeaders: []assembler.Header{{Name: "Content-Type", Value: "application/json"}},
+	})
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+
+	_, err = s.HandleUserTurnWithExternalContext(context.Background(), "main", "hi", strings.Repeat("E", 14000))
+	if err != nil {
+		t.Fatalf("handle turn with external context: %v", err)
+	}
+
+	events, err := mem.ListEventsBySession(context.Background(), "s-ext-status")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	foundCandidate := false
+	foundSent := false
+	for _, e := range events {
+		if e.Kind != eventlog.KindPacketCandidate && e.Kind != eventlog.KindPacketSent {
+			continue
+		}
+		status := readMetaString(e.Meta, "external_context_status")
+		if status != "dropped_budget" {
+			t.Fatalf("expected dropped_budget status on %s, got %q meta=%#v", e.Kind, status, e.Meta)
+		}
+		if readMetaString(e.Meta, "external_context_bytes") != "14000" {
+			t.Fatalf("expected external_context_bytes=14000 on %s, meta=%#v", e.Kind, e.Meta)
+		}
+		if e.Kind == eventlog.KindPacketCandidate {
+			foundCandidate = true
+		}
+		if e.Kind == eventlog.KindPacketSent {
+			foundSent = true
+		}
+	}
+	if !foundCandidate || !foundSent {
+		t.Fatalf("expected both packet.candidate and packet.sent events, got %#v", kinds(events))
+	}
+}
+
 func containsKind(events []eventlog.Event, kind string) bool {
 	for _, e := range events {
 		if e.Kind == kind {

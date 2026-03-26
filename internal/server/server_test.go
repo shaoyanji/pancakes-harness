@@ -579,6 +579,65 @@ func TestPostAgentCallResolvedFingerprintUsesNormalizedIntent(t *testing.T) {
 	}
 }
 
+func TestPostAgentCallExternalContextAffectsFingerprintAndNormalizesWhitespace(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+
+	call := func(body string) (string, int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(body)))
+		srv.Handler().ServeHTTP(rec, req)
+		var out struct {
+			Fingerprint string `json:"fingerprint"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out.Fingerprint, rec.Code
+	}
+
+	base := `{
+		"session_id":"s-ext-fp",
+		"branch_id":"main",
+		"task":"summarize this",
+		"allow_tools":false
+	}`
+	withExternal := `{
+		"session_id":"s-ext-fp",
+		"branch_id":"main",
+		"task":"summarize this",
+		"external_context":"AURA FIXED CONTEXT BLOCK",
+		"allow_tools":false
+	}`
+	withWhitespace := `{
+		"session_id":"s-ext-fp",
+		"branch_id":"main",
+		"task":"summarize this",
+		"external_context":"   \n\t  ",
+		"allow_tools":false
+	}`
+
+	baseFP, baseCode := call(base)
+	extFP, extCode := call(withExternal)
+	whiteFP, whiteCode := call(withWhitespace)
+
+	if baseCode != http.StatusOK || extCode != http.StatusOK || whiteCode != http.StatusOK {
+		t.Fatalf("unexpected statuses: base=%d ext=%d white=%d", baseCode, extCode, whiteCode)
+	}
+	if baseFP == "" || extFP == "" || whiteFP == "" {
+		t.Fatalf("expected non-empty fingerprints, got base=%q ext=%q white=%q", baseFP, extFP, whiteFP)
+	}
+	if baseFP == extFP {
+		t.Fatalf("expected external context to change fingerprint, got %q", baseFP)
+	}
+	if baseFP != whiteFP {
+		t.Fatalf("expected whitespace external context to normalize as omitted, got %q vs %q", baseFP, whiteFP)
+	}
+}
+
 func TestPostAgentCallCoalescingUsesStabilizedFingerprint(t *testing.T) {
 	t.Parallel()
 

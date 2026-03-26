@@ -123,6 +123,45 @@ func TestFingerprintTaskChangeChangesFingerprint(t *testing.T) {
 	}
 }
 
+func TestFingerprintExternalContextChangeChangesFingerprint(t *testing.T) {
+	t.Parallel()
+
+	base := FingerprintInput{
+		SessionID:  "s1",
+		BranchID:   "main",
+		Task:       "task",
+		AllowTools: false,
+	}
+	changed := base
+	changed.ExternalContext = "fixed external context block"
+
+	fpA, err := Fingerprint(base)
+	if err != nil {
+		t.Fatalf("fingerprint base: %v", err)
+	}
+	fpB, err := Fingerprint(changed)
+	if err != nil {
+		t.Fatalf("fingerprint changed: %v", err)
+	}
+	if fpA == fpB {
+		t.Fatalf("expected different fingerprints for external context change, both were %q", fpA)
+	}
+}
+
+func TestRequestNormalizedExternalContextWhitespaceOmitted(t *testing.T) {
+	t.Parallel()
+
+	req := Request{ExternalContext: "   \n\t  "}
+	if got := req.NormalizedExternalContext(); got != "" {
+		t.Fatalf("expected empty normalized external context, got %q", got)
+	}
+
+	in := req.FingerprintInput()
+	if in.ExternalContext != "" {
+		t.Fatalf("expected fingerprint input external context to be omitted, got %q", in.ExternalContext)
+	}
+}
+
 func TestInflightDedupeOneLeaderFollowersWait(t *testing.T) {
 	t.Parallel()
 

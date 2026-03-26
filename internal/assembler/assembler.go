@@ -11,6 +11,12 @@ import (
 func Assemble(req Request) (Result, error) {
 	normalized := normalizeRequest(req)
 	body := normalized.Body
+	externalContextBytes := len(body.ExternalContext)
+	externalContextStatus := "omitted"
+	if body.ExternalContext != "" {
+		externalContextStatus = "included"
+	}
+	externalContextDropped := false
 
 	headerBytes := measureHeaders(normalized.Headers)
 	requestLineBytes := len(normalized.Method) + 1 + len(normalized.Path) + len(" HTTP/1.1\r\n")
@@ -29,9 +35,11 @@ func Assemble(req Request) (Result, error) {
 
 		if bodyBytes <= bodyBudget && envelopeBytes <= MaxEnvelopeBytes {
 			return Result{
-				BodyJSON: bodyJSON,
-				Stage:    stage,
-				Body:     body,
+				BodyJSON:              bodyJSON,
+				Stage:                 stage,
+				Body:                  body,
+				ExternalContextStatus: externalContextStatus,
+				ExternalContextBytes:  externalContextBytes,
 				Measurement: Measurement{
 					RequestLineBytes: requestLineBytes,
 					HeaderBytes:      headerBytes,
@@ -42,17 +50,54 @@ func Assemble(req Request) (Result, error) {
 			}, nil
 		}
 
+		if body.ExternalContext != "" && !externalContextDropped {
+			bodyWithoutExternal := cloneBody(body)
+			bodyWithoutExternal.ExternalContext = ""
+			bodyWithoutExternal.CompactStage = stage
+			bodyWithoutExternalJSON, bodyWithoutExternalBytes, err := marshalDeterministicBody(bodyWithoutExternal)
+			if err != nil {
+				return Result{}, err
+			}
+			envelopeWithoutExternal := requestLineBytes + headerBytes + bodyWithoutExternalBytes
+			if bodyWithoutExternalBytes <= bodyBudget && envelopeWithoutExternal <= MaxEnvelopeBytes {
+				return Result{
+					BodyJSON:              bodyWithoutExternalJSON,
+					Stage:                 stage,
+					Body:                  bodyWithoutExternal,
+					ExternalContextStatus: "dropped_budget",
+					ExternalContextBytes:  externalContextBytes,
+					Measurement: Measurement{
+						RequestLineBytes: requestLineBytes,
+						HeaderBytes:      headerBytes,
+						BodyBudgetBytes:  bodyBudget,
+						BodyBytes:        bodyWithoutExternalBytes,
+						EnvelopeBytes:    envelopeWithoutExternal,
+					},
+				}, nil
+			}
+			body = bodyWithoutExternal
+			externalContextStatus = "dropped_budget"
+			externalContextDropped = true
+		}
+
 		if stage == 7 {
+			finalBodyJSON, finalBodyBytes, err := marshalDeterministicBody(body)
+			if err != nil {
+				return Result{}, err
+			}
+			finalEnvelopeBytes := requestLineBytes + headerBytes + finalBodyBytes
 			return Result{
-				BodyJSON: bodyJSON,
-				Stage:    stage,
-				Body:     body,
+				BodyJSON:              finalBodyJSON,
+				Stage:                 stage,
+				Body:                  body,
+				ExternalContextStatus: externalContextStatus,
+				ExternalContextBytes:  externalContextBytes,
 				Measurement: Measurement{
 					RequestLineBytes: requestLineBytes,
 					HeaderBytes:      headerBytes,
 					BodyBudgetBytes:  bodyBudget,
-					BodyBytes:        bodyBytes,
-					EnvelopeBytes:    envelopeBytes,
+					BodyBytes:        finalBodyBytes,
+					EnvelopeBytes:    finalEnvelopeBytes,
 				},
 			}, ErrPacketRejectedBudget
 		}
@@ -82,6 +127,7 @@ func normalizeRequest(req Request) Request {
 	})
 
 	body := cloneBody(req.Body)
+	body.ExternalContext = strings.TrimSpace(body.ExternalContext)
 	sort.Slice(body.WorkingSet, func(i, j int) bool {
 		if body.WorkingSet[i].FrontierOrdinal == body.WorkingSet[j].FrontierOrdinal {
 			return body.WorkingSet[i].ID < body.WorkingSet[j].ID

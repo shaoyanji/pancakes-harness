@@ -13,12 +13,13 @@ type canonicalConstraint struct {
 }
 
 type canonicalFingerprint struct {
-	SessionID   string                `json:"session_id"`
-	BranchID    string                `json:"branch_id"`
-	Task        string                `json:"task"`
-	Refs        []string              `json:"refs,omitempty"`
-	Constraints []canonicalConstraint `json:"constraints,omitempty"`
-	AllowTools  bool                  `json:"allow_tools"`
+	SessionID       string                `json:"session_id"`
+	BranchID        string                `json:"branch_id"`
+	Task            string                `json:"task"`
+	Refs            []string              `json:"refs,omitempty"`
+	Constraints     []canonicalConstraint `json:"constraints,omitempty"`
+	AllowTools      bool                  `json:"allow_tools"`
+	ExternalContext string                `json:"external_context,omitempty"`
 }
 
 // Fingerprint returns a deterministic digest for logically equivalent ingress requests.
@@ -29,10 +30,11 @@ type canonicalFingerprint struct {
 // - transient fields are excluded by input shape
 func Fingerprint(in FingerprintInput) (string, error) {
 	canonical := canonicalFingerprint{
-		SessionID:  in.SessionID,
-		BranchID:   in.BranchID,
-		Task:       in.Task,
-		AllowTools: in.AllowTools,
+		SessionID:       in.SessionID,
+		BranchID:        in.BranchID,
+		Task:            in.Task,
+		AllowTools:      in.AllowTools,
+		ExternalContext: normalizeExternalContext(in.ExternalContext),
 	}
 
 	if len(in.Refs) > 0 {

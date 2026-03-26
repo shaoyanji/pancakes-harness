@@ -178,3 +178,85 @@ func TestFollowupPacketIncludesMinimalToolExcerptOnly(t *testing.T) {
 		t.Fatal("follow-up packet should keep blob ref for local replay/reuse")
 	}
 }
+
+func TestAssembleExternalContextIncludedWhenProvided(t *testing.T) {
+	t.Parallel()
+
+	external := "AURA:FIXED:context-block:v1"
+	req := Request{
+		Method: "POST",
+		Path:   "/v1/responses",
+		Headers: []Header{
+			{Name: "Content-Type", Value: "application/json"},
+		},
+		Body: PacketBody{
+			SessionID:       "s-ext",
+			BranchHandle:    "b:main",
+			ExternalContext: external,
+			WorkingSet: []WorkingItem{
+				{
+					ID:              "w1",
+					Kind:            "turn.user",
+					Text:            "hello",
+					FrontierOrdinal: 1,
+				},
+			},
+		},
+	}
+
+	result, err := Assemble(req)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if result.ExternalContextStatus != "included" {
+		t.Fatalf("expected included status, got %q", result.ExternalContextStatus)
+	}
+	if result.ExternalContextBytes != len(external) {
+		t.Fatalf("expected external bytes %d, got %d", len(external), result.ExternalContextBytes)
+	}
+	if !BodyContainsText(result.BodyJSON, external) {
+		t.Fatalf("expected external context to be present in body json: %s", string(result.BodyJSON))
+	}
+}
+
+func TestAssembleExternalContextDroppedBeforeCompaction(t *testing.T) {
+	t.Parallel()
+
+	req := Request{
+		Method: "POST",
+		Path:   "/v1/responses",
+		Headers: []Header{
+			{Name: "Content-Type", Value: "application/json"},
+		},
+		Body: PacketBody{
+			SessionID:       "s-ext-drop",
+			BranchHandle:    "b:main",
+			ExternalContext: strings.Repeat("E", 14000),
+			WorkingSet: []WorkingItem{
+				{
+					ID:              "w1",
+					Kind:            "turn.user",
+					Text:            "small body remains valid",
+					FrontierOrdinal: 1,
+				},
+			},
+		},
+	}
+
+	result, err := Assemble(req)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if result.Stage != 0 {
+		t.Fatalf("expected stage 0 after dropping external context, got %d", result.Stage)
+	}
+	if result.ExternalContextStatus != "dropped_budget" {
+		t.Fatalf("expected dropped_budget status, got %q", result.ExternalContextStatus)
+	}
+	if result.ExternalContextBytes != 14000 {
+		t.Fatalf("expected external_context_bytes=14000, got %d", result.ExternalContextBytes)
+	}
+	if BodyContainsText(result.BodyJSON, strings.Repeat("E", 32)) {
+		t.Fatalf("external context should be omitted from body json after budget drop: %s", string(result.BodyJSON))
+	}
+}

@@ -39,6 +39,7 @@ type PacketBody struct {
 	SessionID            string        `json:"session_id"`
 	BranchHandle         string        `json:"branch_handle"`
 	WorkingSet           []WorkingItem `json:"working_set"`
+	ExternalContext      string        `json:"external_context,omitempty"`
 	Frontier             []string      `json:"frontier,omitempty"`
 	Constraints          []Constraint  `json:"constraints,omitempty"`
 	Debug                []string      `json:"debug,omitempty"`
@@ -63,8 +64,10 @@ type Measurement struct {
 }
 
 type Result struct {
-	BodyJSON    []byte
-	Stage       int
-	Measurement Measurement
-	Body        PacketBody
+	BodyJSON              []byte
+	Stage                 int
+	Measurement           Measurement
+	Body                  PacketBody
+	ExternalContextStatus string
+	ExternalContextBytes  int
 }

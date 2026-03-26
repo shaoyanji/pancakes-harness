@@ -97,6 +97,14 @@ func StartSession(cfg Config) (*Session, error) {
 }
 
 func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (TurnResult, error) {
+	return s.handleUserTurn(ctx, branchID, text, "")
+}
+
+func (s *Session) HandleUserTurnWithExternalContext(ctx context.Context, branchID, text, externalContext string) (TurnResult, error) {
+	return s.handleUserTurn(ctx, branchID, text, externalContext)
+}
+
+func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalContext string) (TurnResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -121,7 +129,7 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 	var lastPacketBytes int
 	for i := 0; i < s.maxReasoningTurns; i++ {
 		assembleStarted := time.Now()
-		packet, err := s.assembleForBranch(ctx, branchID)
+		packet, err := s.assembleForBranch(ctx, branchID, externalContext)
 		if err != nil {
 			return TurnResult{}, err
 		}
@@ -145,8 +153,10 @@ func (s *Session) HandleUserTurn(ctx context.Context, branchID, text string) (Tu
 			Kind:      eventlog.KindPacketSent,
 			BranchID:  branchID,
 			Meta: map[string]any{
-				"compact_stage":  strconv.Itoa(packet.Stage),
-				"envelope_bytes": strconv.Itoa(packet.Measurement.EnvelopeBytes),
+				"compact_stage":           strconv.Itoa(packet.Stage),
+				"envelope_bytes":          strconv.Itoa(packet.Measurement.EnvelopeBytes),
+				"external_context_status": packet.ExternalContextStatus,
+				"external_context_bytes":  strconv.Itoa(packet.ExternalContextBytes),
 			},
 		}
 		if err := s.backendAppendEvent(ctx, packetSent); err != nil {
@@ -253,7 +263,7 @@ func (s *Session) ReplaySession(ctx context.Context) (ReplayResult, error) {
 	return ReplayResult{SessionState: state, Branches: heads}, nil
 }
 
-func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assembler.Result, error) {
+func (s *Session) assembleForBranch(ctx context.Context, branchID, externalContext string) (assembler.Result, error) {
 	sessionEvents, err := s.backendListEventsBySession(ctx, s.id)
 	if err != nil {
 		return assembler.Result{}, err
@@ -343,9 +353,10 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 		Path:    "/v1/responses",
 		Headers: append([]assembler.Header(nil), s.modelHeaders...),
 		Body: assembler.PacketBody{
-			SessionID:    s.id,
-			BranchHandle: branchID,
-			WorkingSet:   working,
+			SessionID:       s.id,
+			BranchHandle:    branchID,
+			WorkingSet:      working,
+			ExternalContext: externalContext,
 		},
 	})
 	if assembleErr != nil {
@@ -371,8 +382,10 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID string) (assem
 		Kind:      eventlog.KindPacketCandidate,
 		BranchID:  branchID,
 		Meta: map[string]any{
-			"compact_stage":  strconv.Itoa(packet.Stage),
-			"envelope_bytes": strconv.Itoa(packet.Measurement.EnvelopeBytes),
+			"compact_stage":           strconv.Itoa(packet.Stage),
+			"envelope_bytes":          strconv.Itoa(packet.Measurement.EnvelopeBytes),
+			"external_context_status": packet.ExternalContextStatus,
+			"external_context_bytes":  strconv.Itoa(packet.ExternalContextBytes),
 		},
 	}
 	if err := s.backendAppendEvent(ctx, candidate); err != nil {
