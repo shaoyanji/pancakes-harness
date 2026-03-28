@@ -46,6 +46,8 @@ var (
 	errUnsupportedBackend   = errors.New("unsupported backend mode")
 )
 
+const releaseVersion = "0.2.0"
+
 type launcherConfig struct {
 	modelMode      string
 	modelEndpoint  string
@@ -72,6 +74,18 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
+	if shouldShowVersion(args) {
+		fmt.Fprintf(stdout, "pancakes-harness %s\n", releaseVersion)
+		return 0
+	}
+	if shouldShowHelp(args) {
+		if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "serve") {
+			fmt.Fprint(stdout, serveUsage())
+		} else {
+			fmt.Fprint(stdout, mainUsage())
+		}
+		return 0
+	}
 	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "serve") {
 		return runServe(args[1:], stdout, stderr, getenv)
 	}
@@ -427,4 +441,116 @@ func parseIntOrDefault(raw string, d int) (int, error) {
 		return 0, fmt.Errorf("invalid %s=%q", envServePort, raw)
 	}
 	return n, nil
+}
+
+func shouldShowHelp(args []string) bool {
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "-h", "--help", "help":
+			return true
+		}
+	}
+	return false
+}
+
+func shouldShowVersion(args []string) bool {
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "-version", "--version", "version":
+			return true
+		}
+	}
+	return false
+}
+
+func mainUsage() string {
+	return `pancakes-harness 0.2.0
+
+Local-first context and egress kernel.
+It reconstructs local consult context, shapes a bounded model-facing artifact, preserves replayable branch state, and exposes a thin ingress API.
+It is intentionally not the full agent execution/control plane.
+
+Usage:
+  harness [flags] <prompt>
+  harness [flags] < <prompt-file>
+  harness serve [flags]
+
+One-shot flags:
+  -model-mode string
+        model adapter mode: mock|http|ollama
+  -model-endpoint string
+        HTTP model endpoint URL
+  -model-auth-header string
+        HTTP auth header name
+  -model-auth-key string
+        HTTP auth header value
+  -model-bearer-token string
+        HTTP bearer token (sent as Bearer token)
+  -model-timeout duration
+        model call timeout (e.g. 10s)
+  -ollama-endpoint string
+        Ollama API base URL
+  -ollama-model string
+        Ollama model name
+  -backend-mode string
+        backend mode: memory|xs
+  -xs-command string
+        xs command path when backend-mode=xs
+  -session-id string
+        session id
+  -branch-id string
+        branch id
+
+Serve flags:
+  -bind string
+        bind address (serve mode)
+  -port int
+        bind port (serve mode)
+
+Examples:
+  harness -model-mode mock "hello harness"
+  harness serve -model-mode ollama -ollama-model qwen3:0.6b
+  harness -version
+`
+}
+
+func serveUsage() string {
+	return `pancakes-harness 0.2.0
+
+Usage:
+  harness serve [flags]
+
+Flags:
+  -model-mode string
+        model adapter mode: mock|http|ollama
+  -model-endpoint string
+        HTTP model endpoint URL
+  -model-auth-header string
+        HTTP auth header name
+  -model-auth-key string
+        HTTP auth header value
+  -model-bearer-token string
+        HTTP bearer token (sent as Bearer token)
+  -model-timeout duration
+        model call timeout (e.g. 10s)
+  -ollama-endpoint string
+        Ollama API base URL
+  -ollama-model string
+        Ollama model name
+  -backend-mode string
+        backend mode: memory|xs
+  -xs-command string
+        xs command path when backend-mode=xs
+  -session-id string
+        default session id for one-shot parity
+  -branch-id string
+        default branch id for one-shot parity
+  -bind string
+        bind address (serve mode)
+  -port int
+        bind port (serve mode)
+
+Example:
+  harness serve -model-mode ollama -ollama-model qwen3:0.6b -bind 127.0.0.1 -port 8080
+`
 }

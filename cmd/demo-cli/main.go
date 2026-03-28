@@ -22,6 +22,8 @@ const (
 	modeAgent mode = "agent"
 )
 
+const releaseVersion = "0.2.0"
+
 type config struct {
 	addr      string
 	sessionID string
@@ -48,6 +50,14 @@ func main() {
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if shouldShowVersion(args) {
+		fmt.Fprintf(stdout, "demo-cli %s\n", releaseVersion)
+		return 0
+	}
+	if shouldShowHelp(args) {
+		fmt.Fprint(stdout, usage())
+		return 0
+	}
 	cfg, err := parseFlags(args)
 	if err != nil {
 		fmt.Fprintf(stderr, "config error: %v\n", err)
@@ -404,4 +414,68 @@ func (c *cli) do(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return raw, nil
+}
+
+func shouldShowHelp(args []string) bool {
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "-h", "--help", "help":
+			return true
+		}
+	}
+	return false
+}
+
+func shouldShowVersion(args []string) bool {
+	for _, arg := range args {
+		switch strings.TrimSpace(arg) {
+		case "-version", "--version", "version":
+			return true
+		}
+	}
+	return false
+}
+
+func usage() string {
+	return `demo-cli 0.2.0
+
+Thin demo shell over the pancakes-harness HTTP API.
+It does not add runtime logic or expand the kernel surface.
+
+Usage:
+  demo-cli [flags]
+
+Flags:
+  --addr string
+        harness server address (default http://127.0.0.1:8080)
+  --session-id string
+        existing session id; if empty a new demo id is generated
+  --branch-id string
+        active branch id (default main)
+  --mode string
+        default input mode: turn|agent (default turn)
+  --json
+        print raw response JSON
+
+Commands:
+  plain text
+        sends /v1/turn or /v1/agent-call based on current mode
+  :agent <text>
+        sends /v1/agent-call
+  :fork <name>
+        sends /v1/branch/fork and switches active branch
+  :replay
+        fetches /v1/session/{session_id}/replay
+  :status
+        prints current client state
+  :mode <turn|agent>
+        switches default mode
+  :quit
+        exits the REPL
+
+Examples:
+  demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main
+  demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main --mode agent
+  demo-cli --version
+`
 }

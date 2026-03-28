@@ -1,6 +1,6 @@
 # pancakes-harness
 
-Local-first context and egress harness for agent/model workflows.
+pancakes-harness is a local-first context and egress kernel. It reconstructs local consult context, shapes a bounded model-facing artifact, preserves replayable branch state, and exposes a thin ingress API. It is intentionally not the full agent execution/control plane.
 
 This repository provides a thin core that:
 
@@ -8,6 +8,8 @@ This repository provides a thin core that:
 - rebuilds context from local state
 - assembles model-bound packets under a strict envelope budget
 - exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
+
+Release line: `v0.2.0`
 
 This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
@@ -93,7 +95,14 @@ CGO_ENABLED=0 go run ./cmd/harness serve \
 
 ## Demo CLI (`cmd/demo-cli`)
 
-Small line-oriented demo surface over existing HTTP seams. It does not add runtime logic.
+Small line-oriented demo surface over existing HTTP seams. It does not add runtime logic and is intentionally just a thin shell over the local HTTP API.
+
+Help and version:
+
+```bash
+go run ./cmd/demo-cli --help
+go run ./cmd/demo-cli --version
+```
 
 Run:
 
@@ -110,6 +119,14 @@ Commands:
 - `:status`
 - `:mode <turn|agent>`
 - `:quit`
+
+The CLI defaults to `turn` mode. Use `--mode agent` or `:mode agent` to send plain text to `/v1/agent-call` instead.
+
+Raw JSON mode:
+
+```bash
+go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id main --json
+```
 
 ### Demo flow: normal turn
 
@@ -256,6 +273,7 @@ Notes:
 
 - `refs` are optional hints in v1.
 - `allow_tools=false` blocks tool execution; if the model requests tools, API returns a clean error.
+- `branch_id` is required for a resolved agent-call path; empty scope stays valid but unresolved and does not fabricate a consult manifest.
 
 #### Agent-call contract invariants
 
@@ -440,6 +458,18 @@ HARNESS_SERVE_BIND=127.0.0.1
 HARNESS_SERVE_PORT=8080
 ```
 
+## Binary Help
+
+Both shipped binaries expose explicit help/version text for release verification:
+
+```bash
+go run ./cmd/harness -h
+go run ./cmd/harness -version
+go run ./cmd/harness serve -h
+go run ./cmd/demo-cli --help
+go run ./cmd/demo-cli --version
+```
+
 ## Operator Guidance
 
 Treat this repo as a thin context/egress harness:
@@ -449,3 +479,15 @@ Treat this repo as a thin context/egress harness:
 - keep high-level agent policy and orchestration outside this repo
 
 This separation is the main maintenance advantage for fleet operations.
+
+### Highlights
+
+- Added a typed preflight boundary for `/v1/agent-call`
+- Normalized-equivalent requests now derive the same stabilized fingerprint
+- In-flight coalescing now returns the exact leader-completed payload to equivalent waiters
+- Added deterministic consult manifest generation with byte accounting
+- Resolved `/v1/agent-call` responses now attach a consult manifest in trace output
+- Froze and documented the current `/v1/agent-call` contract invariants
+- Added `cmd/demo-cli`, a small turn-based demo shell over the HTTP API
+- Added explicit `--help` and `--version` behavior for both binaries
+- Added a minimal Nix flake packaging surface for cacheable CI builds

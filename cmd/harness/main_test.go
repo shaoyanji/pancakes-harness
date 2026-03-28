@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"time"
@@ -133,5 +134,33 @@ func TestLauncherCanSelectOllamaMode(t *testing.T) {
 	}
 	if _, ok := a.(*model.OllamaAdapter); !ok {
 		t.Fatalf("expected ollama adapter, got %T", a)
+	}
+}
+
+func TestRunHelpPrintsUsage(t *testing.T) {
+	t.Parallel()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exit := run([]string{"-h"}, strings.NewReader(""), stdout, stderr, func(string) string { return "" })
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "Usage:") || !strings.Contains(got, "Local-first context and egress kernel.") {
+		t.Fatalf("unexpected help output: %q", got)
+	}
+}
+
+func TestRunVersionPrintsRelease(t *testing.T) {
+	t.Parallel()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	exit := run([]string{"-version"}, strings.NewReader(""), stdout, stderr, func(string) string { return "" })
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "pancakes-harness 0.2.0" {
+		t.Fatalf("unexpected version output: %q", got)
 	}
 }

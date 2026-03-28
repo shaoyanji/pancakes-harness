@@ -248,3 +248,32 @@ func TestHandleAgentCompactOutputUnresolved(t *testing.T) {
 		}
 	}
 }
+
+func TestRunHelpPrintsUsage(t *testing.T) {
+	t.Parallel()
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	exit := run([]string{"--help"}, strings.NewReader(""), out, errOut)
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "Thin demo shell over the pancakes-harness HTTP API.") || !strings.Contains(got, "Commands:") {
+		t.Fatalf("unexpected help output: %q", got)
+	}
+}
+
+func TestRunVersionPrintsRelease(t *testing.T) {
+	t.Parallel()
+
+	out := &bytes.Buffer{}
+	errOut := &bytes.Buffer{}
+	exit := run([]string{"--version"}, strings.NewReader(""), out, errOut)
+	if exit != 0 {
+		t.Fatalf("exit=%d stderr=%q", exit, errOut.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.0" {
+		t.Fatalf("unexpected version output: %q", got)
+	}
+}
