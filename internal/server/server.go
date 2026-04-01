@@ -22,6 +22,9 @@ import (
 	"pancakes-harness/internal/tools"
 )
 
+// agentCallContractVersion is the contract version for /v1/agent-call responses.
+const agentCallContractVersion = "agent_call.v1"
+
 var (
 	ErrInvalidConfig = errors.New("invalid server config")
 )
@@ -103,6 +106,7 @@ type agentCallResponse struct {
 	Answer        string           `json:"answer"`
 	ToolCalls     []model.ToolCall `json:"tool_calls"`
 	EnvelopeBytes int              `json:"envelope_bytes"`
+	Contract      string           `json:"contract"`
 	Trace         agentCallTrace   `json:"trace"`
 }
 
@@ -285,6 +289,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 			Missing:   pfResult.Missing,
 			Reason:    pfResult.Reason,
 			ToolCalls: []model.ToolCall{},
+			Contract:  agentCallContractVersion,
 		})
 		return
 	}
@@ -399,6 +404,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		Answer:        res.Answer,
 		ToolCalls:     []model.ToolCall{},
 		EnvelopeBytes: res.PacketEnvelopeBytes,
+		Contract:      agentCallContractVersion,
 		Trace:         trace,
 	}
 	out := coalescedAgentCallResult{

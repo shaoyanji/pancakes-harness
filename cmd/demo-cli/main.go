@@ -22,7 +22,7 @@ const (
 	modeAgent mode = "agent"
 )
 
-const releaseVersion = "0.2.0"
+const releaseVersion = "0.2.1"
 
 type config struct {
 	addr      string
@@ -33,11 +33,13 @@ type config struct {
 }
 
 type cli struct {
-	cfg    config
-	client *http.Client
-	in     io.Reader
-	out    io.Writer
-	err    io.Writer
+	cfg         config
+	client      *http.Client
+	in          io.Reader
+	out         io.Writer
+	err         io.Writer
+	lastResult  []byte
+	lastManifest []byte
 }
 
 type parsedLine struct {
@@ -111,7 +113,7 @@ func parseFlags(args []string) (config, error) {
 func (c *cli) repl() int {
 	currentMode := c.cfg.startMode
 	fmt.Fprintf(c.out, "demo-cli session=%s branch=%s mode=%s addr=%s\n", c.cfg.sessionID, c.cfg.branchID, currentMode, c.cfg.addr)
-	fmt.Fprintln(c.out, "commands: :agent <text>  :fork <name>  :replay  :status  :mode <turn|agent>  :quit")
+	fmt.Fprintln(c.out, "commands: :help  :json on|off  :manifest  :trace  :agent <text>  :fork <name>  :replay  :status  :mode <turn|agent>  :quit")
 
 	s := bufio.NewScanner(c.in)
 	for {
@@ -132,6 +134,26 @@ func (c *cli) repl() int {
 		switch pl.kind {
 		case "quit":
 			return 0
+		case "help":
+			fmt.Fprint(c.out, helpText())
+		case "json":
+			if pl.arg == "on" {
+				c.cfg.jsonOut = true
+				fmt.Fprintln(c.out, "json=on")
+			} else if pl.arg == "off" {
+				c.cfg.jsonOut = false
+				fmt.Fprintln(c.out, "json=off")
+			} else {
+				fmt.Fprintf(c.err, "usage: :json on|off\n")
+			}
+		case "manifest":
+			if err := c.handleManifest(); err != nil {
+				fmt.Fprintf(c.err, "manifest failed: %v\n", err)
+			}
+		case "trace":
+			if err := c.handleTrace(); err != nil {
+				fmt.Fprintf(c.err, "trace failed: %v\n", err)
+			}
 		case "status":
 			fmt.Fprintf(c.out, "session=%s branch=%s mode=%s json=%t addr=%s\n", c.cfg.sessionID, c.cfg.branchID, currentMode, c.cfg.jsonOut, c.cfg.addr)
 		case "mode":
@@ -198,6 +220,8 @@ func parseLine(line string) parsedLine {
 	switch name {
 	case "q", "quit", "exit":
 		return parsedLine{kind: "quit"}
+	case "help", "h", "?":
+		return parsedLine{kind: "help"}
 	case "status":
 		return parsedLine{kind: "status"}
 	case "replay":
@@ -208,6 +232,12 @@ func parseLine(line string) parsedLine {
 		return parsedLine{kind: "agent", arg: arg}
 	case "mode":
 		return parsedLine{kind: "mode", arg: strings.ToLower(arg)}
+	case "json":
+		return parsedLine{kind: "json", arg: strings.ToLower(arg)}
+	case "manifest":
+		return parsedLine{kind: "manifest"}
+	case "trace", "last":
+		return parsedLine{kind: "trace"}
 	default:
 		return parsedLine{kind: name, arg: arg}
 	}
@@ -261,6 +291,7 @@ func (c *cli) handleAgent(task string) error {
 	if err != nil {
 		return err
 	}
+	c.lastResult = append([]byte(nil), raw...)
 	if c.cfg.jsonOut {
 		fmt.Fprintln(c.out, string(raw))
 		return nil
@@ -272,6 +303,7 @@ func (c *cli) handleAgent(task string) error {
 		Resolved    bool     `json:"resolved"`
 		Missing     []string `json:"missing"`
 		Fingerprint string   `json:"fingerprint"`
+		Contract    string   `json:"contract"`
 		Answer      string   `json:"answer"`
 		Trace       struct {
 			ConsultManifest *struct {
@@ -296,6 +328,7 @@ func (c *cli) handleAgent(task string) error {
 		} else {
 			bytesSummary = fmt.Sprintf("%d/-", actual)
 		}
+		c.lastManifest = append([]byte(nil), raw...)
 	}
 
 	if !out.Resolved {
@@ -303,10 +336,18 @@ func (c *cli) handleAgent(task string) error {
 		if missing == "" {
 			missing = "-"
 		}
-		fmt.Fprintf(c.out, "[%s/%s] agent unresolved fp=%s consult=%s missing=%s\n", out.SessionID, out.BranchID, fp, consult, missing)
+		contract := out.Contract
+		if contract == "" {
+			contract = "agent_call.v1"
+		}
+		fmt.Fprintf(c.out, "[%s/%s] agent unresolved fp=%s contract=%s consult=%s missing=%s\n", out.SessionID, out.BranchID, fp, contract, consult, missing)
 		return nil
 	}
-	fmt.Fprintf(c.out, "[%s/%s] agent resolved fp=%s consult=%s bytes=%s answer=%s\n", out.SessionID, out.BranchID, fp, consult, bytesSummary, out.Answer)
+	contract := out.Contract
+	if contract == "" {
+		contract = "agent_call.v1"
+	}
+	fmt.Fprintf(c.out, "[%s/%s] agent resolved fp=%s contract=%s consult=%s bytes=%s answer=%s\n", out.SessionID, out.BranchID, fp, contract, consult, bytesSummary, out.Answer)
 	return nil
 }
 
@@ -367,6 +408,96 @@ func (c *cli) handleReplay() error {
 	sort.Strings(branchNames)
 	fmt.Fprintf(c.out, "replay session=%s events=%d branches=%s\n", out.SessionID, out.State.EventCount, strings.Join(branchNames, ","))
 	return nil
+}
+
+func (c *cli) handleManifest() error {
+	if c.lastManifest == nil {
+		fmt.Fprintln(c.err, "no manifest available; run an agent-call first")
+		return nil
+	}
+	if c.cfg.jsonOut {
+		fmt.Fprintln(c.out, string(c.lastManifest))
+		return nil
+	}
+	var out struct {
+		Trace struct {
+			ConsultManifest *struct {
+				SessionID         string            `json:"session_id"`
+				BranchID          string            `json:"branch_id"`
+				Fingerprint       string            `json:"fingerprint"`
+				Mode              string            `json:"mode"`
+				Scope             string            `json:"scope"`
+				Refs              []string          `json:"refs"`
+				Constraints       map[string]string `json:"constraints"`
+				SelectedItems     []struct {
+					ID    string `json:"id"`
+					Kind  string `json:"kind"`
+					Ref   string `json:"ref"`
+					Bytes int    `json:"bytes"`
+				} `json:"selected_items"`
+				ByteBudget        int    `json:"byte_budget"`
+				ActualBytes       int    `json:"actual_bytes"`
+				Compacted         bool   `json:"compacted"`
+				Truncated         bool   `json:"truncated"`
+				SerializerVersion string `json:"serializer_version"`
+				TaskSummary       string `json:"task_summary"`
+			} `json:"consult_manifest"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal(c.lastManifest, &out); err != nil {
+		fmt.Fprintln(c.out, string(c.lastManifest))
+		return nil
+	}
+	m := out.Trace.ConsultManifest
+	if m == nil {
+		fmt.Fprintln(c.err, "no manifest in last result")
+		return nil
+	}
+	fmt.Fprintf(c.out, "manifest:\n")
+	fmt.Fprintf(c.out, "  session=%s branch=%s mode=%s scope=%s\n", m.SessionID, m.BranchID, m.Mode, m.Scope)
+	fmt.Fprintf(c.out, "  fingerprint=%s\n", m.Fingerprint)
+	fmt.Fprintf(c.out, "  task=%s\n", m.TaskSummary)
+	fmt.Fprintf(c.out, "  refs=%s\n", strings.Join(m.Refs, ", "))
+	fmt.Fprintf(c.out, "  items=%d budget=%d actual=%d compacted=%v truncated=%v\n", len(m.SelectedItems), m.ByteBudget, m.ActualBytes, m.Compacted, m.Truncated)
+	fmt.Fprintf(c.out, "  serializer=%s\n", m.SerializerVersion)
+	if len(m.Constraints) > 0 {
+		fmt.Fprintf(c.out, "  constraints:\n")
+		for k, v := range m.Constraints {
+			fmt.Fprintf(c.out, "    %s=%s\n", k, v)
+		}
+	}
+	return nil
+}
+
+func (c *cli) handleTrace() error {
+	if c.lastResult == nil {
+		fmt.Fprintln(c.err, "no trace available; run an agent-call first")
+		return nil
+	}
+	fmt.Fprintln(c.out, string(c.lastResult))
+	return nil
+}
+
+func helpText() string {
+	return `demo-cli commands:
+  :help                 show this help
+  :json on|off          toggle raw JSON output
+  :manifest             show last agent-call consult manifest
+  :trace, :last         show last agent-call raw JSON result
+  :agent <text>         send /v1/agent-call
+  :fork <name>          fork current branch
+  :replay               replay session events
+  :status               show current state
+  :mode <turn|agent>    switch default mode
+  :quit                 exit
+
+flags:
+  --addr        harness server address (default http://127.0.0.1:8080)
+  --session-id  session id (default: generated)
+  --branch-id   branch id (default: main)
+  --mode        default mode: turn|agent (default: turn)
+  --json        start with JSON output enabled
+`
 }
 
 func (c *cli) postJSON(path string, payload any) ([]byte, error) {
@@ -437,7 +568,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func usage() string {
-	return `demo-cli 0.2.0
+	return `demo-cli 0.2.1
 
 Thin demo shell over the pancakes-harness HTTP API.
 It does not add runtime logic or expand the kernel surface.
@@ -460,6 +591,14 @@ Flags:
 Commands:
   plain text
         sends /v1/turn or /v1/agent-call based on current mode
+  :help
+        show command help
+  :json on|off
+        toggle raw JSON output
+  :manifest
+        show last agent-call consult manifest
+  :trace, :last
+        show last agent-call raw JSON result
   :agent <text>
         sends /v1/agent-call
   :fork <name>

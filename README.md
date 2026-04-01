@@ -9,7 +9,7 @@ This repository provides a thin core that:
 - assembles model-bound packets under a strict envelope budget
 - exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
 
-Release line: `v0.2.0`
+Release line: `v0.2.1`
 
 This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
@@ -93,6 +93,30 @@ CGO_ENABLED=0 go run ./cmd/harness serve \
   -port 8080
 ```
 
+### 5) Nix
+
+If you have Nix with flakes enabled:
+
+```bash
+# Run harness binary
+nix run .#harness -- -model-mode mock "hello harness"
+
+# Run demo-cli
+nix run .#demo-cli -- --addr http://127.0.0.1:8080 --session-id demo --branch-id main
+
+# Run tests
+nix flake check
+
+# Build and enter dev shell
+nix develop
+```
+
+The flake packages:
+
+- `.#harness` - main harness binary
+- `.#demo-cli` - demo CLI shell
+- `.#tests` - test suite (via `nix flake check`)
+
 ## Demo CLI (`cmd/demo-cli`)
 
 Small line-oriented demo surface over existing HTTP seams. It does not add runtime logic and is intentionally just a thin shell over the local HTTP API.
@@ -113,6 +137,10 @@ go run ./cmd/demo-cli --addr http://127.0.0.1:8080 --session-id demo --branch-id
 Commands:
 
 - plain text: sends `/v1/turn` (or `/v1/agent-call` if mode is `agent`)
+- `:help` -> show command help
+- `:json on|off` -> toggle raw JSON output
+- `:manifest` -> show last agent-call consult manifest
+- `:trace`, `:last` -> show last agent-call raw JSON result
 - `:agent <text>` -> `/v1/agent-call`
 - `:fork <name>` -> `/v1/branch/fork`
 - `:replay` -> `/v1/session/{id}/replay`

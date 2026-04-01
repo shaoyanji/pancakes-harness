@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.2.1
+
+Release date: 2026-04-01
+
+pancakes-harness v0.2.1 is a coherence pass focused on inspectability and demo ergonomics.
+
+Highlights:
+
+- Added `:help`, `:json on|off`, `:manifest`, and `:trace`/`:last` commands to `cmd/demo-cli`.
+- Added explicit `contract` version field to `/v1/agent-call` responses (`agent_call.v1`).
+- Consult manifest serializer version stabilized at `consult_manifest.v1`.
+- Improved compact resolved/unresolved output formatting in demo CLI.
+- Documented Nix flake usage (`nix run .#harness`, `nix run .#demo-cli`, `nix flake check`).
+- Added narrow tests to freeze contract field behavior.
+
+Release verification checklist:
+
+- `go test ./...`
+- `go build ./...`
+- `cmd/harness` and `cmd/demo-cli` help/version output verified
+- README aligned to current shipped behavior
+
 ## v0.2.0
 
 Release date: 2026-03-28

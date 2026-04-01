@@ -832,6 +832,107 @@ func TestAgentCallPreflightIntegrationDoesNotRegressTurnPath(t *testing.T) {
 	}
 }
 
+func TestAgentCallResponseIncludesContractVersion(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-contract",
+		"branch_id":"main",
+		"task":"test task",
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Contract string `json:"contract"`
+		Resolved bool   `json:"resolved"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !out.Resolved {
+		t.Fatalf("expected resolved response")
+	}
+	if out.Contract != "agent_call.v1" {
+		t.Fatalf("expected contract=agent_call.v1, got %q", out.Contract)
+	}
+}
+
+func TestAgentCallUnresolvedResponseIncludesContractVersion(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-contract-unresolved",
+		"task":"test task",
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Contract string `json:"contract"`
+		Resolved bool   `json:"resolved"`
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Resolved {
+		t.Fatalf("expected unresolved response")
+	}
+	if out.Decision != "unresolved" {
+		t.Fatalf("expected decision=unresolved, got %q", out.Decision)
+	}
+	if out.Contract != "agent_call.v1" {
+		t.Fatalf("expected contract=agent_call.v1, got %q", out.Contract)
+	}
+}
+
+func TestConsultManifestSerializerVersionIsStable(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-serializer",
+		"branch_id":"main",
+		"task":"test task",
+		"refs":["branch:head"],
+		"constraints":{"reply_style":"brief"},
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Trace struct {
+			ConsultManifest struct {
+				SerializerVersion string `json:"serializer_version"`
+			} `json:"consult_manifest"`
+		} `json:"trace"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Trace.ConsultManifest.SerializerVersion != "consult_manifest.v1" {
+		t.Fatalf("expected serializer_version=consult_manifest.v1, got %q", out.Trace.ConsultManifest.SerializerVersion)
+	}
+}
+
 func newTestServer(t *testing.T, b backend.Backend) *Server {
 	t.Helper()
 	a := model.MockAdapter{
