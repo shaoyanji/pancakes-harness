@@ -15,7 +15,10 @@
           inherit system;
         };
         lib = pkgs.lib;
-        version = "0.2.0";
+        version = "0.2.2";
+
+        # Canonical Go toolchain for this project (matches go.mod: go 1.23)
+        go = pkgs.go_1_23;
 
         mkBinary =
           {
@@ -24,7 +27,7 @@
             binaryName,
           }:
           pkgs.buildGoModule {
-            inherit pname version;
+            inherit pname version go;
             src = ./.;
             vendorHash = null;
             subPackages = [ subPackage ];
@@ -61,7 +64,7 @@
 
         tests = pkgs.buildGoModule {
           pname = "pancakes-harness-tests";
-          inherit version;
+          inherit version go;
           src = ./.;
           vendorHash = null;
           subPackages = [ "cmd/harness" ];
@@ -113,6 +116,11 @@
             gopls
             nixfmt-rfc-style
           ];
+
+          shellHook = ''
+            export GOROOT=
+            export PATH="${go}/bin:$PATH"
+          '';
         };
 
         checks = {

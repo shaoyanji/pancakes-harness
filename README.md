@@ -9,7 +9,7 @@ This repository provides a thin core that:
 - assembles model-bound packets under a strict envelope budget
 - exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
 
-Release line: `v0.2.1`
+Release line: `v0.2.2`
 
 This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
@@ -95,9 +95,13 @@ CGO_ENABLED=0 go run ./cmd/harness serve \
 
 ### 5) Nix
 
-If you have Nix with flakes enabled:
+The flake defines the canonical Go toolchain for this project.
+Use `nix develop` for a consistent development environment.
 
 ```bash
+# Enter the canonical development environment
+nix develop
+
 # Run harness binary
 nix run .#harness -- -model-mode mock "hello harness"
 
@@ -107,8 +111,9 @@ nix run .#demo-cli -- --addr http://127.0.0.1:8080 --session-id demo --branch-id
 # Run tests
 nix flake check
 
-# Build and enter dev shell
-nix develop
+# Build binaries
+nix build .#harness
+nix build .#demo-cli
 ```
 
 The flake packages:
@@ -116,6 +121,8 @@ The flake packages:
 - `.#harness` - main harness binary
 - `.#demo-cli` - demo CLI shell
 - `.#tests` - test suite (via `nix flake check`)
+
+Note: `nix develop` sets up the authoritative Go 1.23 toolchain matching `go.mod`.
 
 ## Demo CLI (`cmd/demo-cli`)
 

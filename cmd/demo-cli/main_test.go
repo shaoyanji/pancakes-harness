@@ -273,7 +273,7 @@ func TestRunVersionPrintsRelease(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%q", exit, errOut.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.1" {
+	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.2" {
 		t.Fatalf("unexpected version output: %q", got)
 	}
 }

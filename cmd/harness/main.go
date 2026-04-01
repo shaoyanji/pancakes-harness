@@ -46,7 +46,7 @@ var (
 	errUnsupportedBackend   = errors.New("unsupported backend mode")
 )
 
-const releaseVersion = "0.2.1"
+const releaseVersion = "0.2.2"
 
 type launcherConfig struct {
 	modelMode      string
@@ -464,7 +464,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func mainUsage() string {
-	return `pancakes-harness 0.2.1
+	return `pancakes-harness 0.2.2
 
 Local-first context and egress kernel.
 It reconstructs local consult context, shapes a bounded model-facing artifact, preserves replayable branch state, and exposes a thin ingress API.
@@ -515,7 +515,7 @@ Examples:
 }
 
 func serveUsage() string {
-	return `pancakes-harness 0.2.1
+	return `pancakes-harness 0.2.2
 
 Usage:
   harness serve [flags]

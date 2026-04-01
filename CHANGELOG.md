@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.2.2
+
+Release date: 2026-04-01
+
+pancakes-harness v0.2.2 is a toolchain coherence pass.
+
+Highlights:
+
+- Made `nix develop` the canonical Go development environment.
+- Defined authoritative Go 1.23 toolchain in `flake.nix` (matching `go.mod`).
+- All package builds (`.#harness`, `.#demo-cli`, `.#tests`) use the same Go toolchain.
+- Updated README to document `nix develop` as the authoritative Go environment.
+
+Release verification checklist:
+
+- `nix develop -c go version` reports Go 1.23
+- `nix build .#harness` passes
+- `nix build .#demo-cli` passes
+- `nix flake check` passes
+- `go test ./...` passes
+- `go build ./...` passes
+
 ## v0.2.1
 
 Release date: 2026-04-01

@@ -22,7 +22,7 @@ const (
 	modeAgent mode = "agent"
 )
 
-const releaseVersion = "0.2.1"
+const releaseVersion = "0.2.2"
 
 type config struct {
 	addr      string
@@ -568,7 +568,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func usage() string {
-	return `demo-cli 0.2.1
+	return `demo-cli 0.2.2
 
 Thin demo shell over the pancakes-harness HTTP API.
 It does not add runtime logic or expand the kernel surface.
