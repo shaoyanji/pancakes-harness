@@ -25,10 +25,11 @@ The system has three planes.
 The local event graph is the source of truth.
 It stores turns, branch operations, tool requests and results, summaries, packet decisions, and replay records.
 
-### Scheduling plane
+### Working-set selection
 
-The runtime chooses which local facts matter now.
-It ranks frontier items, unresolved deltas, recent turns, and tool outputs to produce a tiny working set.
+The runtime chooses which local facts matter for the next contracted step.
+It selects frontier items, unresolved deltas, recent turns, and tool outputs to produce a tiny working set.
+This is an internal selection concern, not a public scheduling surface.
 
 ### Transport plane
 
@@ -187,6 +188,7 @@ First-class visible objects:
 - traces
 - branches
 - blobs
+- consult records
 
 The visible operator language should also stay small.
 Blocking sequence and parallel alternatives are enough for v0.
@@ -308,3 +310,12 @@ Current invariants:
 - concurrent normalized-equivalent requests share one leader execution and every waiter receives the exact leader-completed payload for that fingerprint.
 - resolved responses carry a consult manifest aligned with stabilized identity + normalized intent, with explicit byte accounting.
 - this contract does not alter `/v1/turn` behavior.
+
+### Response artifact vs durable consult record
+
+A resolved `/v1/agent-call` response returns two distinct things:
+
+1. **Response artifact**: the immediate reply (decision, answer, tool_calls) shaped for the caller. This is ephemeral — it answers the request but is not itself the durable record.
+2. **Durable consult record**: a summary-grade event persisted to the local event spine. It captures outcome (resolved/unresolved), fingerprint, session/branch identity, selected refs, byte accounting, and serializer version. It is intentionally narrow: enough to replay, review, or export the consult later without re-executing the full step.
+
+The response artifact is the answer. The consult record is the receipt. Only the consult record becomes a first-class replayable object.

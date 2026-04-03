@@ -21,12 +21,14 @@ Project rules:
 - No silent truncation.
 - Tools are external to the core harness.
 - The Go core must remain distributable as the primary compiled binary.
+- Current priority is deepening consult durability and replayability, not widening extension surfaces.
 
 Execution guidance:
 
 - Start with the smallest milestone that produces a runnable, testable slice.
 - Prefer interface boundaries before optimizations.
 - Do not introduce advanced scheduling, UI work, or distributed execution unless `PLANS.md` explicitly calls for it.
+- Do not introduce plugin registries, policy engines, or framework abstractions without a milestone that explicitly calls for them.
 - When unsure, preserve replayability, diagnosability, and bounded re-execution over convenience.
 
 Validation guidance:

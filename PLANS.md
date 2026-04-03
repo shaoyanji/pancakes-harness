@@ -1,8 +1,20 @@
 # PLANS.md
 
+## Current release arc
+
+The near-term ladder deepens the consult kernel before widening any extension surface:
+
+1. **`v0.2.3` — durable consult events**: consult outcomes become first-class, replayable events on the local event spine.
+2. **`v0.2.4` — explainable selection**: selector rationale (why items were included/excluded) attaches to consult records.
+3. **`v0.2.5` — serializer coherence**: consult manifest and consult event models stay aligned under one serializer version.
+4. **`v0.2.6` — local review/export**: thin local export of consult records for operator review without UI expansion.
+5. **`v0.2.7` — adapter hardening**: backend and model adapter contracts tightened around the durable consult path.
+
+Consult durability is not another feature slot. It is the next kernel-deepening step: the consult outcome itself becomes a durable, replayable object on the existing event/replay spine.
+
 ## Project
 
-Build a **Go-based local-first chatbot/agent harness** where conversation, tool results, summaries, and branches are stored locally as an event-sourced graph, and each remote model call is assembled as a **tiny stateless JSON request** under a strict **14,336-byte HTTP envelope**.
+Build a **Go-first local-first context and egress kernel** where conversation, tool results, summaries, branches, and consult outcomes are stored locally as an event-sourced graph, and each remote model call is assembled as a **tiny stateless JSON request** under a strict **14,336-byte HTTP envelope**.
 
 The system must support:
 

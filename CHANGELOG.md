@@ -4,19 +4,25 @@
 
 Release date: 2026-04-03
 
-pancakes-harness v0.2.3 makes consult outcomes durable.
+pancakes-harness v0.2.3 makes consult activity durable on the existing local event spine.
 
-Highlights:
+This release adds narrow, replayable consult records for `/v1/agent-call` without widening the kernel into a framework or introducing a new storage subsystem. Resolved consults now persist first-class consult events with stable summary-grade metadata such as fingerprint, contract version, outcome, role, byte accounting, and task summary. Coalesced followers append their own linked follower consult events so replay can distinguish leader/follower behavior cleanly.
 
-- Added `consult.resolved` and `consult.unresolved` event kinds to the local event spine.
-- Resolved `/v1/agent-call` requests now append durable consult events on the existing WAL/replay spine.
-- Coalesced agent-calls now persist intelligible leader and follower consult events, with follower events pointing back to the leader consult event id.
-- Replay surfaces consult events as first-class history facts alongside session/branch state.
-- Consult events are summary-grade: outcome, role, fingerprint, session/branch identity, refs, byte accounting, serializer version. No artifact dump.
-- Branchless unresolved scope failures remain response-local in `v0.2.3` so the event spine does not fabricate branch identity.
-- Updated architecture docs, README, and PLANS to name consult records as a first-class visible object.
+Replay and demo surfaces now expose consult activity as first-class history rather than leaving it response-local. At the same time, consult durability is explicitly excluded from future egress selection so the event spine does not contaminate outbound packet assembly.
 
-This release completes the first step of the v0.2.x durability arc: typed ingress → deterministic consult identity → replayable consult record.
+What this release does not do:
+
+- no plugin contract
+- no new backend/store abstraction
+- no scheduler/workflow layer
+- no broad serializer unification
+- no explainable selection payloads yet
+
+Intentional deferral:
+
+branchless unresolved consult failures remain response-local because the current event spine requires a non-empty branch identity, and this release does not relax that invariant or fabricate synthetic scope.
+
+This release completes the durability step of the consult-kernel arc and sets up the next pass: explainable egress selection.
 
 ## v0.2.2
 
