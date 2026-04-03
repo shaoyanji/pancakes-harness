@@ -1,5 +1,23 @@
 # CHANGELOG
 
+## v0.2.3
+
+Release date: 2026-04-03
+
+pancakes-harness v0.2.3 makes consult outcomes durable.
+
+Highlights:
+
+- Added `consult.resolved` and `consult.unresolved` event kinds to the local event spine.
+- Resolved `/v1/agent-call` requests now append durable consult events on the existing WAL/replay spine.
+- Coalesced agent-calls now persist intelligible leader and follower consult events, with follower events pointing back to the leader consult event id.
+- Replay surfaces consult events as first-class history facts alongside session/branch state.
+- Consult events are summary-grade: outcome, role, fingerprint, session/branch identity, refs, byte accounting, serializer version. No artifact dump.
+- Branchless unresolved scope failures remain response-local in `v0.2.3` so the event spine does not fabricate branch identity.
+- Updated architecture docs, README, and PLANS to name consult records as a first-class visible object.
+
+This release completes the first step of the v0.2.x durability arc: typed ingress → deterministic consult identity → replayable consult record.
+
 ## v0.2.2
 
 Release date: 2026-04-01

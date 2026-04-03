@@ -146,6 +146,58 @@ func TestGetSessionReplayReturnsReplayData(t *testing.T) {
 	}
 }
 
+func TestGetSessionReplayIncludesConsultEvents(t *testing.T) {
+	t.Parallel()
+
+	mem := backend.NewMemoryBackend()
+	srv := newTestServer(t, mem)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent-call", bytes.NewReader([]byte(`{
+		"session_id":"s-replay-consult",
+		"branch_id":"main",
+		"task":"Summarize latest result in one sentence",
+		"refs":["branch:head","tool:last"],
+		"constraints":{"reply_style":"brief","max_sentences":1},
+		"allow_tools":false
+	}`)))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent-call status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	replayRec := httptest.NewRecorder()
+	replayReq := httptest.NewRequest(http.MethodGet, "/v1/session/s-replay-consult/replay", nil)
+	srv.Handler().ServeHTTP(replayRec, replayReq)
+	if replayRec.Code != http.StatusOK {
+		t.Fatalf("replay status: %d body=%s", replayRec.Code, replayRec.Body.String())
+	}
+	var out struct {
+		Consults []struct {
+			Outcome                   string   `json:"outcome"`
+			Role                      string   `json:"role"`
+			Fingerprint               string   `json:"fingerprint"`
+			ManifestSerializerVersion string   `json:"manifest_serializer_version"`
+			ByteBudget                int      `json:"byte_budget"`
+			ActualBytes               int      `json:"actual_bytes"`
+			Refs                      []string `json:"refs"`
+		} `json:"consults"`
+	}
+	if err := json.Unmarshal(replayRec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if len(out.Consults) != 1 {
+		t.Fatalf("expected 1 consult event, got %#v", out.Consults)
+	}
+	got := out.Consults[0]
+	if got.Outcome != "resolved" || got.Role != "leader" || got.Fingerprint == "" {
+		t.Fatalf("unexpected consult replay payload: %#v", got)
+	}
+	if got.ManifestSerializerVersion != "consult_manifest.v1" || got.ByteBudget <= 0 || got.ActualBytes <= 0 {
+		t.Fatalf("missing consult replay metadata: %#v", got)
+	}
+}
+
 func TestGetHealthzReflectsBackendHealth(t *testing.T) {
 	t.Parallel()
 
@@ -343,6 +395,30 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 	if out.Trace.ConsultManifest.SerializerVersion == "" {
 		t.Fatalf("missing consult serializer version: %#v", out.Trace.ConsultManifest)
 	}
+
+	events, err := mem.ListEventsBySession(context.Background(), "s-agent")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var consultEvent *eventlog.Event
+	for i := range events {
+		if events[i].Kind == eventlog.KindConsultResolved {
+			consultEvent = &events[i]
+			break
+		}
+	}
+	if consultEvent == nil {
+		t.Fatalf("expected persisted consult event, got %#v", events)
+	}
+	if consultEvent.BranchID != "main" {
+		t.Fatalf("unexpected consult branch: %#v", consultEvent)
+	}
+	if consultEvent.Meta["outcome"] != "resolved" || consultEvent.Meta["role"] != "leader" {
+		t.Fatalf("unexpected consult meta: %#v", consultEvent.Meta)
+	}
+	if consultEvent.Meta["manifest_serializer_version"] != "consult_manifest.v1" {
+		t.Fatalf("unexpected consult serializer meta: %#v", consultEvent.Meta)
+	}
 }
 
 func TestPostAgentCallMalformedRequestReturnsCleanJSON(t *testing.T) {
@@ -519,6 +595,15 @@ func TestPostAgentCallUnresolvedDoesNotExecute(t *testing.T) {
 	}
 	if out.Trace.ConsultManifest != nil {
 		t.Fatalf("unresolved response must not fabricate consult manifest: %#v", out.Trace)
+	}
+	events, err := mem.ListEventsBySession(context.Background(), "s-unresolved")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	for _, e := range events {
+		if e.Kind == eventlog.KindConsultUnresolved {
+			t.Fatalf("branchless unresolved request must not fabricate consult event: %#v", e)
+		}
 	}
 }
 
@@ -733,6 +818,34 @@ func TestPostAgentCallCoalescingUsesStabilizedFingerprint(t *testing.T) {
 	}
 	if string(out1.Trace.ConsultManifest) != string(out2.Trace.ConsultManifest) {
 		t.Fatalf("expected identical consult manifests for leader/follower, got %s vs %s", string(out1.Trace.ConsultManifest), string(out2.Trace.ConsultManifest))
+	}
+
+	events, err := mem.ListEventsBySession(context.Background(), "s-coalesce")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var leaderCount, followerCount int
+	var leaderID string
+	for _, e := range events {
+		if e.Kind != eventlog.KindConsultResolved {
+			continue
+		}
+		switch e.Meta["role"] {
+		case "leader":
+			leaderCount++
+			leaderID = e.ID
+		case "follower":
+			followerCount++
+			if got, _ := e.Meta["leader_consult_event_id"].(string); got == "" {
+				t.Fatalf("follower consult event missing leader id: %#v", e)
+			}
+		}
+	}
+	if leaderCount != 1 || followerCount != 1 {
+		t.Fatalf("expected one leader and one follower consult event, got leader=%d follower=%d events=%#v", leaderCount, followerCount, events)
+	}
+	if leaderID == "" {
+		t.Fatalf("missing leader consult event id")
 	}
 }
 

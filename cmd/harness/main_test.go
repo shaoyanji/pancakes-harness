@@ -160,7 +160,7 @@ func TestRunVersionPrintsRelease(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%q", exit, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "pancakes-harness 0.2.2" {
+	if got := strings.TrimSpace(stdout.String()); got != "pancakes-harness 0.2.3" {
 		t.Fatalf("unexpected version output: %q", got)
 	}
 }

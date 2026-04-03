@@ -12,6 +12,23 @@ import (
 	"testing"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func newTestClient(handler http.Handler) *http.Client {
+	return &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			req := r.Clone(r.Context())
+			handler.ServeHTTP(rec, req)
+			return rec.Result(), nil
+		}),
+	}
+}
+
 func TestParseLineCommands(t *testing.T) {
 	t.Parallel()
 
@@ -70,7 +87,7 @@ func TestReplModeSwitchRoutesTextToAgentCall(t *testing.T) {
 	var mu sync.Mutex
 	calls := map[string]int{}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		calls[r.URL.Path]++
 		mu.Unlock()
@@ -86,14 +103,20 @@ func TestReplModeSwitchRoutesTextToAgentCall(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"not found"}}`))
 		}
-	}))
-	defer ts.Close()
+	})
 
 	input := bytes.NewBufferString(":mode agent\nhello from repl\n:quit\n")
 	out := &bytes.Buffer{}
 	errOut := &bytes.Buffer{}
+	c := cli{
+		cfg:    config{addr: "http://local.test", sessionID: "s1", branchID: "main", startMode: modeTurn},
+		client: newTestClient(handler),
+		in:     input,
+		out:    out,
+		err:    errOut,
+	}
 
-	exit := run([]string{"--addr", ts.URL, "--session-id", "s1", "--branch-id", "main"}, input, out, errOut)
+	exit := c.repl()
 	if exit != 0 {
 		t.Fatalf("run exit=%d stderr=%s", exit, errOut.String())
 	}
@@ -117,7 +140,7 @@ func TestHandleTurnAndAgentRequestConstruction(t *testing.T) {
 	}
 	got := make(chan captured, 2)
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -130,12 +153,11 @@ func TestHandleTurnAndAgentRequestConstruction(t *testing.T) {
 			return
 		}
 		_, _ = w.Write([]byte(`{"session_id":"s1","branch_id":"main","decision":"answer","resolved":true,"fingerprint":"abc","answer":"ok"}`))
-	}))
-	defer ts.Close()
+	})
 
 	c := &cli{
-		cfg:    config{addr: ts.URL, sessionID: "s1", branchID: "main"},
-		client: ts.Client(),
+		cfg:    config{addr: "http://local.test", sessionID: "s1", branchID: "main"},
+		client: newTestClient(handler),
 		out:    io.Discard,
 		err:    io.Discard,
 	}
@@ -173,7 +195,7 @@ func TestHandleTurnAndAgentRequestConstruction(t *testing.T) {
 func TestHandleAgentCompactOutputResolved(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"session_id":"s1",
@@ -184,13 +206,12 @@ func TestHandleAgentCompactOutputResolved(t *testing.T) {
 			"answer":"done",
 			"trace":{"consult_manifest":{"actual_bytes":640,"byte_budget":14336}}
 		}`))
-	}))
-	defer ts.Close()
+	})
 
 	out := &bytes.Buffer{}
 	c := &cli{
-		cfg:    config{addr: ts.URL, sessionID: "s1", branchID: "main"},
-		client: ts.Client(),
+		cfg:    config{addr: "http://local.test", sessionID: "s1", branchID: "main"},
+		client: newTestClient(handler),
 		out:    out,
 		err:    io.Discard,
 	}
@@ -214,7 +235,7 @@ func TestHandleAgentCompactOutputResolved(t *testing.T) {
 func TestHandleAgentCompactOutputUnresolved(t *testing.T) {
 	t.Parallel()
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"session_id":"s1",
@@ -223,13 +244,12 @@ func TestHandleAgentCompactOutputUnresolved(t *testing.T) {
 			"resolved":false,
 			"missing":["scope"]
 		}`))
-	}))
-	defer ts.Close()
+	})
 
 	out := &bytes.Buffer{}
 	c := &cli{
-		cfg:    config{addr: ts.URL, sessionID: "s1", branchID: "main"},
-		client: ts.Client(),
+		cfg:    config{addr: "http://local.test", sessionID: "s1", branchID: "main"},
+		client: newTestClient(handler),
 		out:    out,
 		err:    io.Discard,
 	}
@@ -242,6 +262,44 @@ func TestHandleAgentCompactOutputUnresolved(t *testing.T) {
 		"fp=-",
 		"consult=no",
 		"missing=scope",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected output to contain %q, got %q", want, got)
+		}
+	}
+}
+
+func TestHandleReplayIncludesConsultSummaries(t *testing.T) {
+	t.Parallel()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"session_id":"s1",
+			"branches":{"main":"consult.resolved.leader.1"},
+			"state":{"event_count":5},
+			"consults":[
+				{"outcome":"resolved","role":"leader","branch_id":"main","fingerprint":"1234567890abcdef","actual_bytes":640,"byte_budget":14336},
+				{"outcome":"resolved","role":"follower","branch_id":"main","fingerprint":"1234567890abcdef","leader_consult_event_id":"consult.resolved.leader.1","actual_bytes":640,"byte_budget":14336}
+			]
+		}`))
+	})
+
+	out := &bytes.Buffer{}
+	c := &cli{
+		cfg:    config{addr: "http://local.test", sessionID: "s1", branchID: "main"},
+		client: newTestClient(handler),
+		out:    out,
+		err:    io.Discard,
+	}
+	if err := c.handleReplay(); err != nil {
+		t.Fatalf("handleReplay: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"replay session=s1 events=5 branches=main consults=2",
+		"consult resolved role=leader branch=main fp=1234567890ab bytes=640/14336",
+		"consult resolved role=follower branch=main fp=1234567890ab bytes=640/14336 leader=consult.resolved.leader.1",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, got)
@@ -273,7 +331,7 @@ func TestRunVersionPrintsRelease(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%q", exit, errOut.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.2" {
+	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.3" {
 		t.Fatalf("unexpected version output: %q", got)
 	}
 }

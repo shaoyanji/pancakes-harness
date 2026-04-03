@@ -4,14 +4,39 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"pancakes-harness/internal/branchdag"
+	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/summaries"
 )
 
 var ErrMixedSessionReplay = errors.New("replay input contains multiple sessions")
 var ErrSummaryBasisNotFound = errors.New("summary basis event not found in replay input")
+
+// ConsultEvent is a summary-grade replay fact for a single consult outcome.
+// It is intentionally narrow: enough to replay, review, or export the consult
+// later without re-executing the full step or dumping the full artifact.
+type ConsultEvent struct {
+	EventID                   string   `json:"event_id"`
+	SessionID                 string   `json:"session_id"`
+	BranchID                  string   `json:"branch_id"`
+	Kind                      string   `json:"kind"`
+	SchemaVersion             string   `json:"schema_version,omitempty"`
+	Outcome                   string   `json:"outcome"`
+	Role                      string   `json:"role,omitempty"`
+	Fingerprint               string   `json:"fingerprint,omitempty"`
+	ContractVersion           string   `json:"contract_version,omitempty"`
+	ManifestSerializerVersion string   `json:"manifest_serializer_version,omitempty"`
+	LeaderConsultEventID      string   `json:"leader_consult_event_id,omitempty"`
+	Refs                      []string `json:"refs,omitempty"`
+	Missing                   []string `json:"missing,omitempty"`
+	ByteBudget                int      `json:"byte_budget,omitempty"`
+	ActualBytes               int      `json:"actual_bytes,omitempty"`
+	TaskSummary               string   `json:"task_summary,omitempty"`
+}
 
 type SessionState struct {
 	SessionID   string
@@ -170,6 +195,59 @@ func RebuildBranchFromSummaryAndEvents(branch branchdag.Branch, checkpoint summa
 	return RebuildBranchFromSummaryDelta(branch, checkpoint, delta)
 }
 
+// ListConsultEvents extracts consult outcome events from a session's event stream
+// in chronological order. It returns both resolved and unresolved consults so that
+// the full consult history is visible for replay and review.
+func ListConsultEvents(events []eventlog.Event) ([]ConsultEvent, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	sessionID := events[0].SessionID
+	var out []ConsultEvent
+	for _, e := range events {
+		if e.SessionID != sessionID {
+			return nil, ErrMixedSessionReplay
+		}
+		if e.Kind != eventlog.KindConsultResolved && e.Kind != eventlog.KindConsultUnresolved {
+			continue
+		}
+		ce := ConsultEvent{
+			EventID:   e.ID,
+			SessionID: e.SessionID,
+			BranchID:  e.BranchID,
+			Kind:      e.Kind,
+			Outcome:   consultOutcomeForKind(e.Kind),
+			Refs:      append([]string(nil), e.Refs...),
+		}
+		ce.SchemaVersion = readMetaString(e.Meta, "schema_version")
+		ce.Role = readMetaString(e.Meta, "role")
+		ce.Fingerprint = readMetaString(e.Meta, "fingerprint")
+		ce.ContractVersion = readMetaString(e.Meta, "contract_version")
+		ce.ManifestSerializerVersion = readMetaString(e.Meta, "manifest_serializer_version")
+		ce.LeaderConsultEventID = readMetaString(e.Meta, "leader_consult_event_id")
+		ce.TaskSummary = readMetaString(e.Meta, "task_summary")
+		if outcome := readMetaString(e.Meta, "outcome"); outcome != "" {
+			ce.Outcome = outcome
+		}
+		ce.Missing = readMetaStrings(e.Meta, "missing")
+		ce.ByteBudget = readMetaInt(e.Meta, "byte_budget")
+		ce.ActualBytes = readMetaInt(e.Meta, "actual_bytes")
+		out = append(out, ce)
+	}
+	return out, nil
+}
+
+func consultOutcomeForKind(kind string) string {
+	switch kind {
+	case eventlog.KindConsultResolved:
+		return consult.OutcomeResolved
+	case eventlog.KindConsultUnresolved:
+		return consult.OutcomeUnresolved
+	default:
+		return ""
+	}
+}
+
 func ensureBranch(graph *branchdag.Graph, branchID string) (branchdag.Branch, error) {
 	if existing, err := graph.GetBranch(branchID); err == nil {
 		return existing, nil
@@ -190,4 +268,62 @@ func readMetaString(meta map[string]any, key string) string {
 		return ""
 	}
 	return s
+}
+
+func readMetaStrings(meta map[string]any, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return nil
+	}
+	switch v := raw.(type) {
+	case []string:
+		return append([]string(nil), v...)
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		return []string{s}
+	default:
+		return nil
+	}
+}
+
+func readMetaInt(meta map[string]any, key string) int {
+	if meta == nil {
+		return 0
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }

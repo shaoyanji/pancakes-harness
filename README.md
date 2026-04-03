@@ -1,15 +1,19 @@
 # pancakes-harness
 
-pancakes-harness is a local-first context and egress kernel. It reconstructs local consult context, shapes a bounded model-facing artifact, preserves replayable branch state, and exposes a thin ingress API. It is intentionally not the full agent execution/control plane.
+pancakes-harness is a local-first context and egress kernel. It reconstructs local consult context, shapes a bounded model-facing artifact, persists a replayable consult record for every resolved consult, and exposes a thin ingress API. It is intentionally not the full agent execution/control plane.
+
+The public promise is:
+
+**typed ingress → deterministic consult identity → replayable consult record → stable serializers**
 
 This repository provides a thin core that:
 
-- persists session/branch state locally
+- persists session/branch/consult state locally
 - rebuilds context from local state
 - assembles model-bound packets under a strict envelope budget
 - exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
 
-Release line: `v0.2.2`
+Release line: `v0.2.3`
 
 This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
@@ -26,6 +30,23 @@ This repository does not provide the full agent policy layer (approvals, sandbox
 - Transcript-forwarding layer that ships full conversation history by default.
 - Distributed scheduler or fleet coordinator.
 - Heavy observability stack.
+
+## What a Consult Leaves Behind
+
+Every resolved `/v1/agent-call` leaves a **durable consult event** on the local event spine. A consult event is summary-grade, not an artifact dump. It captures:
+
+- session/branch identity and normalized fingerprint
+- consult event schema version and agent-call contract version
+- resolved vs unresolved outcome
+- leader vs follower coalescing role
+- selected refs and byte accounting
+- consult manifest serializer version when a manifest exists
+
+The response artifact (the immediate answer) answers the caller. The consult event is the receipt — the first-class replayable object. This is what makes the kernel reviewable: any past consult can be replayed, exported, or compared without re-executing the full step.
+
+Consult manifest generation remains deterministic and stable, but it is a renderer-grade artifact derived from the same normalized boundary that produces the durable consult event.
+
+In `v0.2.3`, unresolved consults are durably recorded when the request has a stable branch identity. A branchless unresolved request such as missing `scope` remains response-local for now so the event spine does not fabricate branch identity or relax core event invariants.
 
 ## Architectural Invariants
 
@@ -150,7 +171,7 @@ Commands:
 - `:trace`, `:last` -> show last agent-call raw JSON result
 - `:agent <text>` -> `/v1/agent-call`
 - `:fork <name>` -> `/v1/branch/fork`
-- `:replay` -> `/v1/session/{id}/replay`
+- `:replay` -> `/v1/session/{id}/replay` including durable consult events
 - `:status`
 - `:mode <turn|agent>`
 - `:quit`
@@ -342,109 +363,45 @@ Typical fields include:
 
 ## Benchmark Scripts
 
-### `scripts/benchmark_compare.sh`
+The `scripts/` directory contains helpers for comparing harness egress against direct naive model calls:
 
-Simple latency comparison:
+| Script | Purpose |
+|--------|---------|
+| `benchmark_compare.sh` | Simple latency comparison (direct Ollama vs `/v1/turn` vs `/v1/agent-call`) |
+| `benchmark_context_growth.sh` | Context-growth benchmark across scenarios (`linear`, `noisy`, `tool_heavy`, `branched`) |
+| `benchmark_context_growth_reduced.sh` | Reduced matrix for repeatable larger runs |
+| `benchmark_report.sh` | Post-processes CSV output into a markdown report |
 
-- direct Ollama API call
-- harness `/v1/turn`
-- harness `/v1/agent-call`
+All scripts compare three paths: direct naive full-context call, harness `/v1/turn`, and harness `/v1/agent-call`. They collect latency, egress envelope bytes, direct request body bytes, correctness (loose/strict), and compaction-stage hints.
 
-Run:
+See the [Benchmark Methodology](#benchmark-methodology) and [Benchmark Caveats](#benchmark-caveats-and-interpretation) sections below for interpretation guidance.
 
-```bash
-N=3 \
-OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
-OLLAMA_MODEL=qwen3:0.6b \
-HARNESS_URL=http://127.0.0.1:8080 \
-./scripts/benchmark_compare.sh
-```
-
-### `scripts/benchmark_context_growth.sh`
-
-Context-growth benchmark for scenarios (`linear`, `noisy`, `tool_heavy`, optional `branched`):
-
-- direct naive full-context Ollama baseline
-- harness `/v1/turn`
-- harness `/v1/agent-call`
-
-Outputs CSV with latency, envelope bytes (harness), direct request body bytes, output text, correctness, and compaction-stage hints.
-
-Run:
+### Quick start
 
 ```bash
-HARNESS_URL=http://127.0.0.1:8080 \
-OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
-OLLAMA_MODEL=qwen3:0.6b \
-SCENARIOS="linear noisy tool_heavy branched" \
-SIZES="4 8 16" \
-RUNS=1 \
-OUTPUT_FILE=/tmp/context_growth.csv \
-./scripts/benchmark_context_growth.sh
-```
+# Simple comparison (N=3)
+N=3 OLLAMA_ENDPOINT=http://127.0.0.1:11434 OLLAMA_MODEL=qwen3:0.6b HARNESS_URL=http://127.0.0.1:8080 ./scripts/benchmark_compare.sh
 
-### `scripts/benchmark_context_growth_reduced.sh`
-
-Reduced matrix helper for repeatable larger runs:
-
-- scenarios: `branched tool_heavy noisy`
-- sizes: `16 32 64 128`
-
-Run:
-
-```bash
-HARNESS_URL=http://127.0.0.1:8080 \
-OLLAMA_ENDPOINT=http://127.0.0.1:11434 \
-OLLAMA_MODEL=qwen3:0.6b \
-RUNS=1 \
-OUTPUT_FILE=/tmp/context_growth_reduced.csv \
-./scripts/benchmark_context_growth_reduced.sh
-```
-
-### `scripts/benchmark_report.sh`
-
-Post-processes context-growth CSV output into a markdown report with:
-
-- per scenario/size/path median latency
-- timeout counts
-- loose and strict correctness pass rates
-- average/max envelope bytes
-- average/max request body bytes
-- dominant compaction stage
-- anomaly counts (extra-text, non-ASCII, possible language drift)
-
-Run:
-
-```bash
+# Context growth report
+HARNESS_URL=http://127.0.0.1:8080 OLLAMA_ENDPOINT=http://127.0.0.1:11434 OLLAMA_MODEL=qwen3:0.6b SCENARIOS="linear noisy tool_heavy" SIZES="4 8 16" RUNS=1 OUTPUT_FILE=/tmp/context_growth.csv ./scripts/benchmark_context_growth.sh
 ./scripts/benchmark_report.sh /tmp/context_growth.csv /tmp/context_growth_report.md
-```
-
-Or print to stdout only:
-
-```bash
-./scripts/benchmark_report.sh /tmp/context_growth.csv
 ```
 
 ## Benchmark Methodology
 
 - Warm model once before timing.
-- For each scenario/size, build synthetic history before measured calls.
-- Compare three paths:
-  - direct naive full-context call to Ollama
-  - harness `/v1/turn`
-  - harness `/v1/agent-call`
-- Evaluate correctness via benchmark token checks:
-  - loose correctness: token present / reported pass
-  - strict correctness: exact expected token only
-- Collect latency, egress envelope bytes (harness), direct request body bytes, and compaction-stage hints.
+- Build synthetic history before measured calls for each scenario/size.
+- Compare three paths: direct naive full-context Ollama, harness `/v1/turn`, harness `/v1/agent-call`.
+- Evaluate correctness via loose (token present) and strict (exact expected token only) checks.
+- Collect latency, egress envelope bytes, direct request body bytes, and compaction-stage hints.
 
 ## Benchmark Caveats And Interpretation
 
-- Direct baseline and harness are intentionally different egress strategies; absolute latency alone is insufficient.
-- Strict correctness is the stronger signal for instruction adherence; loose correctness can mask extra-text behavior.
-- Timeout spikes can dominate medians at low run counts; use larger `RUNS` for stable comparisons.
-- Non-ASCII and language-drift anomaly flags are heuristics for operator review, not definitive model-quality judgments.
-- Compaction stage dominance helps identify when context growth starts forcing aggressive egress reduction.
+- Absolute latency alone is insufficient; direct and harness are intentionally different egress strategies.
+- Strict correctness is the stronger signal; loose correctness can mask extra-text behavior.
+- Timeout spikes dominate medians at low run counts; use larger `RUNS` for stable comparisons.
+- Non-ASCII and language-drift anomaly flags are heuristics, not definitive quality judgments.
+- Compaction stage dominance identifies when context growth forces aggressive egress reduction.
 
 ## Troubleshooting
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"pancakes-harness/internal/branchdag"
+	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/summaries"
 )
@@ -303,5 +304,69 @@ func TestReplayPreservesToolEventsCleanly(t *testing.T) {
 	}
 	if len(main.DirtyRanges) != 1 || main.DirtyRanges[0].StartEventID != "e1" || main.DirtyRanges[0].EndEventID != "e3" {
 		t.Fatalf("unexpected dirty range after tool events: %#v", main.DirtyRanges)
+	}
+}
+
+func TestListConsultEventsSurfacesResolvedAndFollowerState(t *testing.T) {
+	t.Parallel()
+
+	ts := time.Date(2026, 4, 3, 1, 2, 3, 0, time.UTC)
+	events := []eventlog.Event{
+		{
+			ID:        "consult.resolved.leader.1",
+			SessionID: "s-consult",
+			TS:        ts,
+			Kind:      eventlog.KindConsultResolved,
+			BranchID:  "main",
+			Refs:      []string{"branch:head", "tool:last"},
+			Meta: consult.EventSummary{
+				SchemaVersion:             consult.EventSchemaVersionV1,
+				Fingerprint:               "fp-1",
+				ContractVersion:           "agent_call.v1",
+				ManifestSerializerVersion: consult.SerializerVersionV1,
+				Outcome:                   consult.OutcomeResolved,
+				Role:                      consult.RoleLeader,
+				ByteBudget:                14336,
+				ActualBytes:               640,
+				TaskSummary:               "summarize latest state",
+			}.Meta(),
+		},
+		{
+			ID:        "consult.resolved.follower.2",
+			SessionID: "s-consult",
+			TS:        ts.Add(time.Second),
+			Kind:      eventlog.KindConsultResolved,
+			BranchID:  "main",
+			Refs:      []string{"branch:head", "tool:last"},
+			Meta: consult.EventSummary{
+				SchemaVersion:             consult.EventSchemaVersionV1,
+				Fingerprint:               "fp-1",
+				ContractVersion:           "agent_call.v1",
+				ManifestSerializerVersion: consult.SerializerVersionV1,
+				Outcome:                   consult.OutcomeResolved,
+				Role:                      consult.RoleFollower,
+				LeaderConsultEventID:      "consult.resolved.leader.1",
+				ByteBudget:                14336,
+				ActualBytes:               640,
+				TaskSummary:               "summarize latest state",
+			}.Meta(),
+		},
+	}
+
+	consults, err := ListConsultEvents(events)
+	if err != nil {
+		t.Fatalf("list consult events: %v", err)
+	}
+	if len(consults) != 2 {
+		t.Fatalf("expected 2 consult events, got %d", len(consults))
+	}
+	if consults[0].Outcome != consult.OutcomeResolved || consults[0].Role != consult.RoleLeader {
+		t.Fatalf("unexpected leader consult event: %#v", consults[0])
+	}
+	if consults[1].Role != consult.RoleFollower || consults[1].LeaderConsultEventID != "consult.resolved.leader.1" {
+		t.Fatalf("unexpected follower consult event: %#v", consults[1])
+	}
+	if consults[0].ByteBudget != 14336 || consults[0].ActualBytes != 640 {
+		t.Fatalf("unexpected byte accounting: %#v", consults[0])
 	}
 }

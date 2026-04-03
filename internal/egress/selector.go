@@ -113,6 +113,9 @@ func isNeverEgressKind(kind string) bool {
 	if strings.HasPrefix(k, "branch.fork") {
 		return true
 	}
+	if strings.HasPrefix(k, "consult.") {
+		return true
+	}
 	if strings.HasPrefix(k, "summary.rebuild") {
 		return true
 	}

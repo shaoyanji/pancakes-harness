@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"pancakes-harness/internal/assembler"
@@ -18,6 +19,7 @@ import (
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/preflight"
+	"pancakes-harness/internal/replay"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/tools"
 )
@@ -44,6 +46,8 @@ type Server struct {
 	cfg Config
 
 	inflight *ingressctrl.Inflight
+
+	consultCounter uint64
 }
 
 func New(cfg Config) (*Server, error) {
@@ -117,10 +121,11 @@ type agentCallTrace struct {
 }
 
 type coalescedAgentCallResult struct {
-	Status       int
-	Response     *agentCallResponse
-	ErrorCode    string
-	ErrorMessage string
+	Status         int
+	Response       *agentCallResponse
+	ErrorCode      string
+	ErrorMessage   string
+	ConsultEventID string
 }
 
 type branchForkRequest struct {
@@ -134,9 +139,10 @@ type branchForkResponse struct {
 }
 
 type replayResponse struct {
-	SessionID string              `json:"session_id"`
-	Branches  map[string]string   `json:"branches"`
-	State     replayStateResponse `json:"state"`
+	SessionID string                `json:"session_id"`
+	Branches  map[string]string     `json:"branches"`
+	State     replayStateResponse   `json:"state"`
+	Consults  []replay.ConsultEvent `json:"consults,omitempty"`
 }
 
 type replayStateResponse struct {
@@ -281,6 +287,39 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !pfResult.Resolved {
+		if branchID := strings.TrimSpace(req.BranchID); branchID != "" {
+			fingerprint, err := ingressctrl.FingerprintRequest(ingressctrl.Request{
+				SessionID:       req.SessionID,
+				BranchID:        branchID,
+				Task:            req.Task,
+				Refs:            pfResult.Refs,
+				Constraints:     pfResult.Constraints,
+				AllowTools:      pfResult.AllowTools,
+				ExternalContext: req.ExternalContext,
+			})
+			if err != nil {
+				s.cfg.Metrics.IncError(route)
+				writeJSONError(w, http.StatusBadRequest, "malformed_boundary_input", "unable to fingerprint request")
+				return
+			}
+			ctx, cancel := s.requestContext(r.Context())
+			defer cancel()
+			if _, err := s.appendConsultEvent(ctx, consultEventRecord{
+				SessionID:       req.SessionID,
+				BranchID:        branchID,
+				Refs:            pfResult.Refs,
+				Fingerprint:     fingerprint,
+				ContractVersion: agentCallContractVersion,
+				TaskSummary:     req.Task,
+				Outcome:         consult.OutcomeUnresolved,
+				Role:            consult.RoleLeader,
+				Missing:         pfResult.Missing,
+			}); err != nil {
+				s.cfg.Metrics.IncError(route)
+				writeJSONError(w, http.StatusInternalServerError, "consult_event_failed", err.Error())
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, agentCallResponse{
 			SessionID: req.SessionID,
 			BranchID:  req.BranchID,
@@ -341,6 +380,28 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 			s.cfg.Metrics.IncError(route)
 			writeJSONError(w, http.StatusInternalServerError, "coalesced_result_missing", "missing coalesced leader result")
 			return
+		}
+		if out.Response != nil && out.Response.Resolved {
+			ctx, cancel := s.requestContext(r.Context())
+			defer cancel()
+			if _, err := s.appendConsultEvent(ctx, consultEventRecord{
+				SessionID:                 out.Response.SessionID,
+				BranchID:                  out.Response.BranchID,
+				Refs:                      consultRefs(out.Response),
+				Fingerprint:               out.Response.Fingerprint,
+				ContractVersion:           out.Response.Contract,
+				ManifestSerializerVersion: consultManifestSerializerVersion(out.Response),
+				ByteBudget:                consultByteBudget(out.Response),
+				ActualBytes:               consultActualBytes(out.Response),
+				TaskSummary:               consultTaskSummary(out.Response),
+				Outcome:                   consult.OutcomeResolved,
+				Role:                      consult.RoleFollower,
+				LeaderConsultEventID:      out.ConsultEventID,
+			}); err != nil {
+				s.cfg.Metrics.IncError(route)
+				writeJSONError(w, http.StatusInternalServerError, "consult_event_failed", err.Error())
+				return
+			}
 		}
 		writeCoalescedAgentCallResult(w, out)
 		return
@@ -407,9 +468,34 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		Contract:      agentCallContractVersion,
 		Trace:         trace,
 	}
+	consultEventID, err := s.appendConsultEvent(ctx, consultEventRecord{
+		SessionID:                 req.SessionID,
+		BranchID:                  branch,
+		Refs:                      pfResult.Refs,
+		Fingerprint:               fingerprint,
+		ContractVersion:           agentCallContractVersion,
+		ManifestSerializerVersion: manifest.SerializerVersion,
+		ByteBudget:                manifest.ByteBudget,
+		ActualBytes:               manifest.ActualBytes,
+		TaskSummary:               task,
+		Outcome:                   consult.OutcomeResolved,
+		Role:                      consult.RoleLeader,
+	})
+	if err != nil {
+		s.cfg.Metrics.IncError(route)
+		out := coalescedAgentCallResult{
+			Status:       http.StatusInternalServerError,
+			ErrorCode:    "consult_event_failed",
+			ErrorMessage: err.Error(),
+		}
+		publish(out)
+		writeCoalescedAgentCallResult(w, out)
+		return
+	}
 	out := coalescedAgentCallResult{
-		Status:   http.StatusOK,
-		Response: &resp,
+		Status:         http.StatusOK,
+		Response:       &resp,
+		ConsultEventID: consultEventID,
 	}
 	publish(out)
 	writeCoalescedAgentCallResult(w, out)
@@ -486,6 +572,18 @@ func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "replay_failed", err.Error())
 		return
 	}
+	events, err := s.cfg.Backend.ListEventsBySession(ctx, sessionID)
+	if err != nil {
+		s.cfg.Metrics.IncError(route)
+		writeJSONError(w, http.StatusInternalServerError, "replay_failed", err.Error())
+		return
+	}
+	consults, err := replay.ListConsultEvents(events)
+	if err != nil {
+		s.cfg.Metrics.IncError(route)
+		writeJSONError(w, http.StatusInternalServerError, "replay_failed", err.Error())
+		return
+	}
 
 	writeJSON(w, http.StatusOK, replayResponse{
 		SessionID: sessionID,
@@ -496,6 +594,7 @@ func (s *Server) handleSessionReplay(w http.ResponseWriter, r *http.Request) {
 			LastEventID: replayed.SessionState.LastEventID,
 			EventCount:  replayed.SessionState.EventCount,
 		},
+		Consults: consults,
 	})
 }
 
@@ -714,4 +813,93 @@ func writeCoalescedAgentCallResult(w http.ResponseWriter, out coalescedAgentCall
 		return
 	}
 	writeJSON(w, out.Status, out.Response)
+}
+
+type consultEventRecord struct {
+	SessionID                 string
+	BranchID                  string
+	Refs                      []string
+	Fingerprint               string
+	ContractVersion           string
+	ManifestSerializerVersion string
+	LeaderConsultEventID      string
+	ByteBudget                int
+	ActualBytes               int
+	TaskSummary               string
+	Outcome                   string
+	Role                      string
+	Missing                   []string
+}
+
+func (s *Server) appendConsultEvent(ctx context.Context, rec consultEventRecord) (string, error) {
+	kind := eventlog.KindConsultResolved
+	if rec.Outcome == consult.OutcomeUnresolved {
+		kind = eventlog.KindConsultUnresolved
+	}
+	eventID := s.nextConsultEventID(rec.Outcome, rec.Role)
+	ev := eventlog.Event{
+		ID:        eventID,
+		SessionID: strings.TrimSpace(rec.SessionID),
+		TS:        time.Now().UTC(),
+		Kind:      kind,
+		BranchID:  strings.TrimSpace(rec.BranchID),
+		Refs:      append([]string(nil), rec.Refs...),
+		Meta: consult.EventSummary{
+			SchemaVersion:             consult.EventSchemaVersionV1,
+			Fingerprint:               rec.Fingerprint,
+			ContractVersion:           rec.ContractVersion,
+			ManifestSerializerVersion: rec.ManifestSerializerVersion,
+			Outcome:                   rec.Outcome,
+			Role:                      rec.Role,
+			LeaderConsultEventID:      rec.LeaderConsultEventID,
+			ByteBudget:                rec.ByteBudget,
+			ActualBytes:               rec.ActualBytes,
+			TaskSummary:               rec.TaskSummary,
+			Missing:                   rec.Missing,
+		}.Meta(),
+	}
+	if err := s.cfg.Backend.AppendEvent(ctx, ev); err != nil {
+		return "", err
+	}
+	return eventID, nil
+}
+
+func (s *Server) nextConsultEventID(outcome, role string) string {
+	n := atomic.AddUint64(&s.consultCounter, 1)
+	return fmt.Sprintf("consult.%s.%s.%d", strings.TrimSpace(outcome), strings.TrimSpace(role), n)
+}
+
+func consultRefs(resp *agentCallResponse) []string {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return nil
+	}
+	return append([]string(nil), resp.Trace.ConsultManifest.Refs...)
+}
+
+func consultManifestSerializerVersion(resp *agentCallResponse) string {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return ""
+	}
+	return resp.Trace.ConsultManifest.SerializerVersion
+}
+
+func consultByteBudget(resp *agentCallResponse) int {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return 0
+	}
+	return resp.Trace.ConsultManifest.ByteBudget
+}
+
+func consultActualBytes(resp *agentCallResponse) int {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return 0
+	}
+	return resp.Trace.ConsultManifest.ActualBytes
+}
+
+func consultTaskSummary(resp *agentCallResponse) string {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return ""
+	}
+	return resp.Trace.ConsultManifest.TaskSummary
 }

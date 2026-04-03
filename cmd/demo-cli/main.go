@@ -22,7 +22,7 @@ const (
 	modeAgent mode = "agent"
 )
 
-const releaseVersion = "0.2.2"
+const releaseVersion = "0.2.3"
 
 type config struct {
 	addr      string
@@ -33,12 +33,12 @@ type config struct {
 }
 
 type cli struct {
-	cfg         config
-	client      *http.Client
-	in          io.Reader
-	out         io.Writer
-	err         io.Writer
-	lastResult  []byte
+	cfg          config
+	client       *http.Client
+	in           io.Reader
+	out          io.Writer
+	err          io.Writer
+	lastResult   []byte
 	lastManifest []byte
 }
 
@@ -396,6 +396,16 @@ func (c *cli) handleReplay() error {
 		State     struct {
 			EventCount int `json:"event_count"`
 		} `json:"state"`
+		Consults []struct {
+			Outcome              string   `json:"outcome"`
+			Role                 string   `json:"role"`
+			BranchID             string   `json:"branch_id"`
+			Fingerprint          string   `json:"fingerprint"`
+			LeaderConsultEventID string   `json:"leader_consult_event_id"`
+			Missing              []string `json:"missing"`
+			ByteBudget           int      `json:"byte_budget"`
+			ActualBytes          int      `json:"actual_bytes"`
+		} `json:"consults"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		fmt.Fprintln(c.out, string(raw))
@@ -406,7 +416,22 @@ func (c *cli) handleReplay() error {
 		branchNames = append(branchNames, k)
 	}
 	sort.Strings(branchNames)
-	fmt.Fprintf(c.out, "replay session=%s events=%d branches=%s\n", out.SessionID, out.State.EventCount, strings.Join(branchNames, ","))
+	fmt.Fprintf(c.out, "replay session=%s events=%d branches=%s consults=%d\n", out.SessionID, out.State.EventCount, strings.Join(branchNames, ","), len(out.Consults))
+	for _, consult := range out.Consults {
+		fp := shortFingerprint(consult.Fingerprint)
+		if len(consult.Missing) > 0 {
+			fmt.Fprintf(c.out, "consult %s role=%s branch=%s fp=%s missing=%s\n", consult.Outcome, consult.Role, consult.BranchID, fp, strings.Join(consult.Missing, ","))
+			continue
+		}
+		line := fmt.Sprintf("consult %s role=%s branch=%s fp=%s", consult.Outcome, consult.Role, consult.BranchID, fp)
+		if consult.ByteBudget > 0 || consult.ActualBytes > 0 {
+			line += fmt.Sprintf(" bytes=%d/%d", consult.ActualBytes, consult.ByteBudget)
+		}
+		if consult.LeaderConsultEventID != "" {
+			line += " leader=" + consult.LeaderConsultEventID
+		}
+		fmt.Fprintln(c.out, line)
+	}
 	return nil
 }
 
@@ -422,14 +447,14 @@ func (c *cli) handleManifest() error {
 	var out struct {
 		Trace struct {
 			ConsultManifest *struct {
-				SessionID         string            `json:"session_id"`
-				BranchID          string            `json:"branch_id"`
-				Fingerprint       string            `json:"fingerprint"`
-				Mode              string            `json:"mode"`
-				Scope             string            `json:"scope"`
-				Refs              []string          `json:"refs"`
-				Constraints       map[string]string `json:"constraints"`
-				SelectedItems     []struct {
+				SessionID     string            `json:"session_id"`
+				BranchID      string            `json:"branch_id"`
+				Fingerprint   string            `json:"fingerprint"`
+				Mode          string            `json:"mode"`
+				Scope         string            `json:"scope"`
+				Refs          []string          `json:"refs"`
+				Constraints   map[string]string `json:"constraints"`
+				SelectedItems []struct {
 					ID    string `json:"id"`
 					Kind  string `json:"kind"`
 					Ref   string `json:"ref"`
@@ -568,7 +593,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func usage() string {
-	return `demo-cli 0.2.2
+	return `demo-cli 0.2.3
 
 Thin demo shell over the pancakes-harness HTTP API.
 It does not add runtime logic or expand the kernel surface.

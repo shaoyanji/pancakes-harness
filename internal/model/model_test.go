@@ -14,6 +14,22 @@ import (
 	"pancakes-harness/internal/eventlog"
 )
 
+type modelRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f modelRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func newModelTestClient(handler http.Handler) *http.Client {
+	return &http.Client{
+		Transport: modelRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+			return rec.Result(), nil
+		}),
+	}
+}
+
 func TestMalformedModelResponseRejectedCleanly(t *testing.T) {
 	t.Parallel()
 
@@ -90,13 +106,13 @@ func TestMockAdapterCanBeSwappedWithoutRuntimeChanges(t *testing.T) {
 		},
 	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"decision":"answer","answer":"ok"}`))
-	}))
-	defer server.Close()
+	})
 
-	httpAdapter := NewHTTPAdapter(HTTPConfig{Endpoint: server.URL})
+	httpAdapter := NewHTTPAdapter(HTTPConfig{Endpoint: "http://local.test"})
+	httpAdapter.client = newModelTestClient(handler)
 
 	mockResp := run(t, mockAdapter)
 	httpResp := run(t, httpAdapter)

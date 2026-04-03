@@ -24,6 +24,24 @@ func TestDebugMetricsNeverEnterEgress(t *testing.T) {
 	}
 }
 
+func TestConsultEventsNeverEnterEgress(t *testing.T) {
+	t.Parallel()
+
+	in := []Candidate{
+		{ID: "c1", Kind: "consult.resolved", FrontierOrdinal: 0, IsActiveBranch: true},
+		{ID: "c2", Kind: "consult.unresolved", FrontierOrdinal: 1, IsActiveBranch: true},
+	}
+	out := Select(in)
+	for _, sel := range out {
+		if sel.Include {
+			t.Fatalf("expected consult items to be excluded, got %#v", sel)
+		}
+		if sel.Class != ClassDebugNever {
+			t.Fatalf("expected class %q, got %q", ClassDebugNever, sel.Class)
+		}
+	}
+}
+
 func TestLatestToolResultBecomesSummaryOnly(t *testing.T) {
 	t.Parallel()
 

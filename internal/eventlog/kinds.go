@@ -14,4 +14,6 @@ const (
 	KindPacketRejected    = "packet.rejected_budget"
 	KindResponseReceived  = "response.received"
 	KindResponseInvalid   = "response.invalid_schema"
+	KindConsultResolved   = "consult.resolved"
+	KindConsultUnresolved = "consult.unresolved"
 )
