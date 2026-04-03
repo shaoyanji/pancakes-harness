@@ -31,7 +31,7 @@ perl -MText::ParseWords -e '
   my %idx;
   for my $i (0..$#h) { $idx{$h[$i]} = $i; }
 
-  for my $required (qw(scenario size path latency_ms envelope_bytes request_body_bytes correctness compaction_stage output_text)) {
+  for my $required (qw(scenario size path latency_ms envelope_bytes request_body_bytes correctness compaction_stage selector_inclusion_reason selector_exclusion_reason selector_budget_pressure output_text)) {
     die "missing required column: $required\n" unless exists $idx{$required};
   }
 
@@ -53,6 +53,9 @@ perl -MText::ParseWords -e '
     my $reqb = $f[$idx{request_body_bytes}];
     my $correctness = lc($f[$idx{correctness}] // "");
     my $stage = $f[$idx{compaction_stage}] // "n/a";
+    my $selector_inclusion = $f[$idx{selector_inclusion_reason}] // "n/a";
+    my $selector_exclusion = $f[$idx{selector_exclusion_reason}] // "n/a";
+    my $selector_budget_pressure = 0 + ($f[$idx{selector_budget_pressure}] || 0);
     my $text = $f[$idx{output_text}] // "";
     $text =~ s/^\s+|\s+$//g;
 
@@ -65,6 +68,9 @@ perl -MText::ParseWords -e '
       timeout => 0, strict_pass => 0, loose_pass => 0,
       extra_text => 0, non_ascii => 0, language_drift => 0,
       stage => {},
+      selector_inclusion => {},
+      selector_exclusion => {},
+      selector_budget_pressure => 0,
     });
     $a->{n}++;
     push @{$a->{lat}}, $latency;
@@ -82,6 +88,13 @@ perl -MText::ParseWords -e '
     if ($stage ne "" && $stage ne "n/a") {
       $a->{stage}{$stage}++;
     }
+    if ($selector_inclusion ne "" && $selector_inclusion ne "n/a") {
+      $a->{selector_inclusion}{$selector_inclusion}++;
+    }
+    if ($selector_exclusion ne "" && $selector_exclusion ne "n/a") {
+      $a->{selector_exclusion}{$selector_exclusion}++;
+    }
+    $a->{selector_budget_pressure} += $selector_budget_pressure if $selector_budget_pressure > 0;
 
     my $expected_re = qr/BENCH_OK_\Q$scenario\E_\Q$size\E_\d+/;
     my $strict = ($text =~ /^$expected_re$/) ? 1 : 0;
@@ -150,8 +163,8 @@ perl -MText::ParseWords -e '
   print "- Possible language-drift anomalies: `$global_drift`\n\n";
 
   print "## Per Scenario/Size/Path\n\n";
-  print "| scenario | size | path | n | median_latency_ms | timeout_count | loose_pass_rate | strict_pass_rate | avg_envelope_bytes | max_envelope_bytes | avg_request_body_bytes | max_request_body_bytes | dominant_compaction_stage | extra_text_anomalies | non_ascii_anomalies |\n";
-  print "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|\n";
+  print "| scenario | size | path | n | median_latency_ms | timeout_count | loose_pass_rate | strict_pass_rate | avg_envelope_bytes | max_envelope_bytes | avg_request_body_bytes | max_request_body_bytes | dominant_compaction_stage | dominant_selector_inclusion | dominant_selector_exclusion | selector_budget_pressure | extra_text_anomalies | non_ascii_anomalies |\n";
+  print "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---:|---:|\n";
 
   for my $key (sort {
     my ($as, $az, $ap) = split(/\|/, $a, 3);
@@ -167,7 +180,9 @@ perl -MText::ParseWords -e '
     my $avg_req = avg_or_na($x->{req_sum}, $x->{req_count});
     my $max_req = $x->{req_count} ? $x->{req_max} : "n/a";
     my $stage = dominant_stage($x->{stage});
-    print "| $x->{scenario} | $x->{size} | $x->{path} | $x->{n} | $med | $x->{timeout} | $loose_rate | $strict_rate | $avg_env | $max_env | $avg_req | $max_req | $stage | $x->{extra_text} | $x->{non_ascii} |\n";
+    my $selector_in = dominant_stage($x->{selector_inclusion});
+    my $selector_ex = dominant_stage($x->{selector_exclusion});
+    print "| $x->{scenario} | $x->{size} | $x->{path} | $x->{n} | $med | $x->{timeout} | $loose_rate | $strict_rate | $avg_env | $max_env | $avg_req | $max_req | $stage | $selector_in | $selector_ex | $x->{selector_budget_pressure} | $x->{extra_text} | $x->{non_ascii} |\n";
   }
   print "\n";
 ' "$INPUT_CSV" "$TIMEOUT_MS" > "$tmp_out"

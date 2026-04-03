@@ -180,6 +180,59 @@ func TestGenerateEquivalentNormalizedInputsProduceIdenticalManifests(t *testing.
 	}
 }
 
+func TestGenerateNormalizesSelectionExplanationDeterministically(t *testing.T) {
+	t.Parallel()
+
+	m, err := Generate(Input{
+		SessionID:   "s-select",
+		BranchID:    "main",
+		Fingerprint: "fp-select",
+		Mode:        "agent_call",
+		Scope:       "branch:main",
+		SelectedItems: []SelectedItem{
+			{ID: "item-b", Kind: "tool.result", SummaryRef: "summary://tool/1", Bytes: 4, Reason: "tool_result"},
+			{ID: "item-a", Kind: "turn.user", Bytes: 2, Reason: "recent_turn"},
+		},
+		Selection: &SelectionExplanation{
+			Included: []SelectionItem{
+				{ID: "item-b", Kind: "tool.result", Reason: "tool_result", Class: "summary_only"},
+				{ID: "item-a", Kind: "turn.user", Reason: "recent_turn", Class: "passthrough"},
+			},
+			Excluded: []SelectionItem{
+				{ID: "sib", Kind: "turn.agent", Reason: "non_local", Class: "drop_unless_asked"},
+				{ID: "dbg", Kind: "packet.sent", Reason: "debug_never", Class: "debug_never"},
+			},
+			DominantInclusionReasons: []ReasonCount{
+				{Reason: "recent_turn", Count: 1},
+				{Reason: "tool_result", Count: 1},
+			},
+			DominantExclusionReasons: []ReasonCount{
+				{Reason: "non_local", Count: 3},
+				{Reason: "debug_never", Count: 1},
+			},
+			BudgetPressure: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if got := []string{m.SelectedItems[0].ID, m.SelectedItems[1].ID}; !reflect.DeepEqual(got, []string{"item-a", "item-b"}) {
+		t.Fatalf("unexpected selected item order: %#v", got)
+	}
+	if m.SelectedItems[0].Reason != "recent_turn" || m.SelectedItems[1].Reason != "tool_result" {
+		t.Fatalf("unexpected selected item reasons: %#v", m.SelectedItems)
+	}
+	if m.Selection == nil || !m.Selection.BudgetPressure {
+		t.Fatalf("expected selection explanation with budget pressure, got %#v", m.Selection)
+	}
+	if got := []string{m.Selection.Excluded[0].ID, m.Selection.Excluded[1].ID}; !reflect.DeepEqual(got, []string{"dbg", "sib"}) {
+		t.Fatalf("unexpected excluded order: %#v", m.Selection.Excluded)
+	}
+	if got := m.Selection.DominantExclusionReasons; len(got) != 2 || got[0].Reason != "non_local" || got[0].Count != 3 || got[1].Reason != "debug_never" {
+		t.Fatalf("unexpected dominant exclusion reasons: %#v", got)
+	}
+}
+
 func TestGenerateMalformedInput(t *testing.T) {
 	t.Parallel()
 

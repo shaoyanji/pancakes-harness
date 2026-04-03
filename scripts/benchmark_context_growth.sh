@@ -96,6 +96,45 @@ compaction_stage_delta() {
   ' "$before" "$after"
 }
 
+reason_delta() {
+  local before="$1"
+  local after="$2"
+  local field="$3"
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    my ($braw, $araw, $field) = @ARGV;
+    my $b = eval { JSON::PP->new->decode($braw) } || {};
+    my $a = eval { JSON::PP->new->decode($araw) } || {};
+    my $bm = $b->{$field} || {};
+    my $am = $a->{$field} || {};
+    my ($best_key, $best_delta) = ("n/a", 0);
+    for my $k (sort keys %$am) {
+      my $d = ($am->{$k} || 0) - ($bm->{$k} || 0);
+      next if $d <= 0;
+      if ($d > $best_delta || ($d == $best_delta && $k lt $best_key)) {
+        $best_key = $k;
+        $best_delta = $d;
+      }
+    }
+    print $best_key;
+  ' "$before" "$after" "$field"
+}
+
+budget_pressure_delta() {
+  local before="$1"
+  local after="$2"
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    my ($braw, $araw) = @ARGV;
+    my $b = eval { JSON::PP->new->decode($braw) } || {};
+    my $a = eval { JSON::PP->new->decode($araw) } || {};
+    my $delta = ($a->{selector_budget_pressure_total} || 0) - ($b->{selector_budget_pressure_total} || 0);
+    print($delta > 0 ? $delta : 0);
+  ' "$before" "$after"
+}
+
 scenario_message() {
   local scenario="$1"
   local idx="$2"
@@ -209,8 +248,11 @@ append_result() {
   local output_text="$7"
   local correctness="$8"
   local compaction_stage="$9"
+  local selector_inclusion="$10"
+  local selector_exclusion="${11}"
+  local selector_budget_pressure="${12}"
   {
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$scenario" \
       "$size" \
       "$path" \
@@ -219,12 +261,15 @@ append_result() {
       "$request_body_bytes" \
       "$correctness" \
       "$compaction_stage" \
+      "$selector_inclusion" \
+      "$selector_exclusion" \
+      "$selector_budget_pressure" \
       "$(csv_escape "$output_text")"
   } >>"$OUTPUT_FILE"
 }
 
 warm_model
-echo 'scenario,size,path,latency_ms,envelope_bytes,request_body_bytes,correctness,compaction_stage,output_text' >"$OUTPUT_FILE"
+echo 'scenario,size,path,latency_ms,envelope_bytes,request_body_bytes,correctness,compaction_stage,selector_inclusion_reason,selector_exclusion_reason,selector_budget_pressure,output_text' >"$OUTPUT_FILE"
 
 for scenario in $SCENARIOS; do
   for size in $SIZES; do
@@ -242,7 +287,7 @@ for scenario in $SCENARIOS; do
       direct_text="$(json_get "$direct_resp" "message.content")"
       direct_ok="fail"
       [[ "$direct_text" == *"$token"* ]] && direct_ok="pass"
-      append_result "$scenario" "$size" "direct_full_context" "$direct_latency" "n/a" "${direct_request_bytes:-n/a}" "$direct_text" "$direct_ok" "n/a"
+      append_result "$scenario" "$size" "direct_full_context" "$direct_latency" "n/a" "${direct_request_bytes:-n/a}" "$direct_text" "$direct_ok" "n/a" "n/a" "n/a" "0"
 
       # 2) Harness /v1/turn
       before_metrics="$(metrics_snapshot)"
@@ -253,9 +298,12 @@ for scenario in $SCENARIOS; do
       turn_text="$(json_get "$turn_resp" "answer")"
       turn_env="$(json_get "$turn_resp" "envelope_bytes")"
       turn_stage="$(compaction_stage_delta "$before_metrics" "$after_metrics")"
+      turn_selector_in="$(reason_delta "$before_metrics" "$after_metrics" "selector_inclusion_reason_counts")"
+      turn_selector_ex="$(reason_delta "$before_metrics" "$after_metrics" "selector_exclusion_reason_counts")"
+      turn_budget_pressure="$(budget_pressure_delta "$before_metrics" "$after_metrics")"
       turn_ok="fail"
       [[ "$turn_text" == *"$token"* ]] && turn_ok="pass"
-      append_result "$scenario" "$size" "harness_v1_turn" "$turn_latency" "${turn_env:-n/a}" "n/a" "$turn_text" "$turn_ok" "$turn_stage"
+      append_result "$scenario" "$size" "harness_v1_turn" "$turn_latency" "${turn_env:-n/a}" "n/a" "$turn_text" "$turn_ok" "$turn_stage" "$turn_selector_in" "$turn_selector_ex" "$turn_budget_pressure"
 
       # 3) Harness /v1/agent-call
       before_metrics="$(metrics_snapshot)"
@@ -266,9 +314,12 @@ for scenario in $SCENARIOS; do
       agent_text="$(json_get "$agent_resp" "answer")"
       agent_env="$(json_get "$agent_resp" "envelope_bytes")"
       agent_stage="$(compaction_stage_delta "$before_metrics" "$after_metrics")"
+      agent_selector_in="$(reason_delta "$before_metrics" "$after_metrics" "selector_inclusion_reason_counts")"
+      agent_selector_ex="$(reason_delta "$before_metrics" "$after_metrics" "selector_exclusion_reason_counts")"
+      agent_budget_pressure="$(budget_pressure_delta "$before_metrics" "$after_metrics")"
       agent_ok="fail"
       [[ "$agent_text" == *"$token"* ]] && agent_ok="pass"
-      append_result "$scenario" "$size" "harness_v1_agent_call" "$agent_latency" "${agent_env:-n/a}" "n/a" "$agent_text" "$agent_ok" "$agent_stage"
+      append_result "$scenario" "$size" "harness_v1_agent_call" "$agent_latency" "${agent_env:-n/a}" "n/a" "$agent_text" "$agent_ok" "$agent_stage" "$agent_selector_in" "$agent_selector_ex" "$agent_budget_pressure"
     done
   done
 done

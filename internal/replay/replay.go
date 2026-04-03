@@ -20,22 +20,23 @@ var ErrSummaryBasisNotFound = errors.New("summary basis event not found in repla
 // It is intentionally narrow: enough to replay, review, or export the consult
 // later without re-executing the full step or dumping the full artifact.
 type ConsultEvent struct {
-	EventID                   string   `json:"event_id"`
-	SessionID                 string   `json:"session_id"`
-	BranchID                  string   `json:"branch_id"`
-	Kind                      string   `json:"kind"`
-	SchemaVersion             string   `json:"schema_version,omitempty"`
-	Outcome                   string   `json:"outcome"`
-	Role                      string   `json:"role,omitempty"`
-	Fingerprint               string   `json:"fingerprint,omitempty"`
-	ContractVersion           string   `json:"contract_version,omitempty"`
-	ManifestSerializerVersion string   `json:"manifest_serializer_version,omitempty"`
-	LeaderConsultEventID      string   `json:"leader_consult_event_id,omitempty"`
-	Refs                      []string `json:"refs,omitempty"`
-	Missing                   []string `json:"missing,omitempty"`
-	ByteBudget                int      `json:"byte_budget,omitempty"`
-	ActualBytes               int      `json:"actual_bytes,omitempty"`
-	TaskSummary               string   `json:"task_summary,omitempty"`
+	EventID                   string                        `json:"event_id"`
+	SessionID                 string                        `json:"session_id"`
+	BranchID                  string                        `json:"branch_id"`
+	Kind                      string                        `json:"kind"`
+	SchemaVersion             string                        `json:"schema_version,omitempty"`
+	Outcome                   string                        `json:"outcome"`
+	Role                      string                        `json:"role,omitempty"`
+	Fingerprint               string                        `json:"fingerprint,omitempty"`
+	ContractVersion           string                        `json:"contract_version,omitempty"`
+	ManifestSerializerVersion string                        `json:"manifest_serializer_version,omitempty"`
+	LeaderConsultEventID      string                        `json:"leader_consult_event_id,omitempty"`
+	Refs                      []string                      `json:"refs,omitempty"`
+	Missing                   []string                      `json:"missing,omitempty"`
+	ByteBudget                int                           `json:"byte_budget,omitempty"`
+	ActualBytes               int                           `json:"actual_bytes,omitempty"`
+	TaskSummary               string                        `json:"task_summary,omitempty"`
+	Selection                 *consult.SelectionExplanation `json:"selection,omitempty"`
 }
 
 type SessionState struct {
@@ -232,6 +233,7 @@ func ListConsultEvents(events []eventlog.Event) ([]ConsultEvent, error) {
 		ce.Missing = readMetaStrings(e.Meta, "missing")
 		ce.ByteBudget = readMetaInt(e.Meta, "byte_budget")
 		ce.ActualBytes = readMetaInt(e.Meta, "actual_bytes")
+		ce.Selection = readMetaSelection(e.Meta, "selection")
 		out = append(out, ce)
 	}
 	return out, nil
@@ -326,4 +328,114 @@ func readMetaInt(meta map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func readMetaSelection(meta map[string]any, key string) *consult.SelectionExplanation {
+	if meta == nil {
+		return nil
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return nil
+	}
+	body, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := &consult.SelectionExplanation{
+		Included:                 readSelectionItems(body, "included"),
+		Excluded:                 readSelectionItems(body, "excluded"),
+		DominantInclusionReasons: readReasonCounts(body, "dominant_inclusion_reasons"),
+		DominantExclusionReasons: readReasonCounts(body, "dominant_exclusion_reasons"),
+	}
+	if pressure, ok := body["budget_pressure"].(bool); ok {
+		out.BudgetPressure = pressure
+	}
+	if len(out.Included) == 0 && len(out.Excluded) == 0 && len(out.DominantInclusionReasons) == 0 && len(out.DominantExclusionReasons) == 0 && !out.BudgetPressure {
+		return nil
+	}
+	return out
+}
+
+func readSelectionItems(meta map[string]any, key string) []consult.SelectionItem {
+	raw, ok := meta[key]
+	if !ok {
+		return nil
+	}
+	if list, ok := raw.([]map[string]any); ok {
+		out := make([]consult.SelectionItem, 0, len(list))
+		for _, item := range list {
+			if next, ok := selectionItemFromMeta(item); ok {
+				out = append(out, next)
+			}
+		}
+		return out
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]consult.SelectionItem, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if next, ok := selectionItemFromMeta(m); ok {
+			out = append(out, next)
+		}
+	}
+	return out
+}
+
+func selectionItemFromMeta(meta map[string]any) (consult.SelectionItem, bool) {
+	id := readMetaString(meta, "id")
+	kind := readMetaString(meta, "kind")
+	reason := readMetaString(meta, "reason")
+	if id == "" || kind == "" || reason == "" {
+		return consult.SelectionItem{}, false
+	}
+	return consult.SelectionItem{
+		ID:     id,
+		Kind:   kind,
+		Reason: reason,
+		Class:  readMetaString(meta, "class"),
+	}, true
+}
+
+func readReasonCounts(meta map[string]any, key string) []consult.ReasonCount {
+	raw, ok := meta[key]
+	if !ok {
+		return nil
+	}
+	if list, ok := raw.([]map[string]any); ok {
+		out := make([]consult.ReasonCount, 0, len(list))
+		for _, item := range list {
+			reason := readMetaString(item, "reason")
+			count := readMetaInt(item, "count")
+			if reason == "" || count <= 0 {
+				continue
+			}
+			out = append(out, consult.ReasonCount{Reason: reason, Count: count})
+		}
+		return out
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]consult.ReasonCount, 0, len(list))
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		reason := readMetaString(m, "reason")
+		count := readMetaInt(m, "count")
+		if reason == "" || count <= 0 {
+			continue
+		}
+		out = append(out, consult.ReasonCount{Reason: reason, Count: count})
+	}
+	return out
 }

@@ -59,6 +59,9 @@ func TestLatestToolResultBecomesSummaryOnly(t *testing.T) {
 	if got.Text != "" || got.SummaryRef != "summary://tool/c1" {
 		t.Fatalf("expected summary-only projection, got %#v", got)
 	}
+	if got.Reason != ReasonToolResult {
+		t.Fatalf("expected tool_result reason, got %#v", got)
+	}
 }
 
 func TestCurrentUserTurnRemainsPassthrough(t *testing.T) {
@@ -125,8 +128,14 @@ func TestActiveBranchHeadAndNearestSummaryAreSelected(t *testing.T) {
 	if out[1].Class != ClassSummaryOnly || !out[1].Include || out[1].SummaryRef != "summary://checkpoint/new" {
 		t.Fatalf("expected nearest summary to be selected summary_only, got %#v", out[1])
 	}
+	if out[1].Reason != ReasonSummaryCheckpoint {
+		t.Fatalf("expected summary_checkpoint reason, got %#v", out[1])
+	}
 	if out[2].Class != ClassPassthrough || !out[2].Include || out[2].Text != "latest question" {
 		t.Fatalf("expected active head user passthrough, got %#v", out[2])
+	}
+	if out[2].Reason != ReasonRecentTurn {
+		t.Fatalf("expected recent_turn reason, got %#v", out[2])
 	}
 }
 
@@ -144,5 +153,75 @@ func TestLatestActiveBranchToolSummaryIsPreserved(t *testing.T) {
 	}
 	if out[2].Include {
 		t.Fatalf("expected sibling tool dropped by default, got %#v", out[2])
+	}
+}
+
+func TestSelectWithExplanationAssignsInclusionAndExclusionReasons(t *testing.T) {
+	t.Parallel()
+
+	selected, explanation := SelectWithExplanation([]Candidate{
+		{ID: "u1", Kind: "turn.user", IsActiveBranch: true, IsCurrentUserTurn: true, Text: "ask", FrontierOrdinal: 10},
+		{ID: "sum1", Kind: "summary.checkpoint", IsActiveBranch: true, IsNearestSummary: true, IsCheckpoint: true, SummaryRef: "summary://checkpoint/1", FrontierOrdinal: 9},
+		{ID: "tool1", Kind: "tool.result", IsActiveBranch: true, IsLatestToolResult: true, SummaryRef: "summary://tool/1", FrontierOrdinal: 8},
+		{ID: "sib1", Kind: "turn.agent", IsActiveBranch: false, FrontierOrdinal: 7},
+		{ID: "dbg1", Kind: "packet.sent", IsActiveBranch: true, FrontierOrdinal: 6},
+	})
+
+	if len(selected) != 5 {
+		t.Fatalf("unexpected selected size: %d", len(selected))
+	}
+	if len(explanation.Included) != 3 {
+		t.Fatalf("expected 3 included items, got %#v", explanation.Included)
+	}
+	if explanation.Included[0].Reason != ReasonRecentTurn || explanation.Included[1].Reason != ReasonSummaryCheckpoint || explanation.Included[2].Reason != ReasonToolResult {
+		t.Fatalf("unexpected inclusion reasons: %#v", explanation.Included)
+	}
+	if len(explanation.Excluded) != 2 {
+		t.Fatalf("expected 2 excluded items, got %#v", explanation.Excluded)
+	}
+	if explanation.Excluded[0].Reason != ReasonNonLocal || explanation.Excluded[1].Reason != ReasonDebugNever {
+		t.Fatalf("unexpected exclusion reasons: %#v", explanation.Excluded)
+	}
+}
+
+func TestSelectWithExplanationOrdersDominantReasonsDeterministically(t *testing.T) {
+	t.Parallel()
+
+	_, explanation := SelectWithExplanation([]Candidate{
+		{ID: "a", Kind: "turn.agent", IsActiveBranch: true, Text: "one", FrontierOrdinal: 1},
+		{ID: "b", Kind: "turn.agent", IsActiveBranch: true, Text: "two", FrontierOrdinal: 2},
+		{ID: "c", Kind: "turn.user", IsActiveBranch: true, IsCurrentUserTurn: true, Text: "latest", FrontierOrdinal: 3},
+		{ID: "d", Kind: "turn.agent", IsActiveBranch: false, FrontierOrdinal: 4},
+		{ID: "e", Kind: "tool.failure", IsActiveBranch: true, IsSensitiveLocal: true, FrontierOrdinal: 5},
+		{ID: "f", Kind: "trace.debug", IsActiveBranch: true, FrontierOrdinal: 6},
+	})
+
+	if got := explanation.DominantInclusionReasons; len(got) < 2 || got[0].Reason != ReasonBranchLocality || got[0].Count != 2 || got[1].Reason != ReasonRecentTurn || got[1].Count != 1 {
+		t.Fatalf("unexpected dominant inclusion reasons: %#v", got)
+	}
+	if got := explanation.DominantExclusionReasons; len(got) != 3 || got[0].Reason != ReasonDebugNever || got[1].Reason != ReasonNonLocal || got[2].Reason != ReasonSensitiveLocal {
+		t.Fatalf("unexpected dominant exclusion reasons ordering: %#v", got)
+	}
+}
+
+func TestSelectWithExplanationBoundsExcludedSamples(t *testing.T) {
+	t.Parallel()
+
+	candidates := make([]Candidate, 0, 10)
+	for i := 0; i < 10; i++ {
+		candidates = append(candidates, Candidate{
+			ID:              "sibling-" + string(rune('a'+i)),
+			Kind:            "turn.agent",
+			IsActiveBranch:  false,
+			FrontierOrdinal: i,
+		})
+	}
+
+	_, explanation := SelectWithExplanation(candidates)
+	if len(explanation.Excluded) != maxExcluded {
+		t.Fatalf("expected %d excluded samples, got %d", maxExcluded, len(explanation.Excluded))
+	}
+	if explanation.DominantExclusionReasons[0].Reason != ReasonNonLocal || explanation.DominantExclusionReasons[0].Count != 10 {
+		t.Fatalf("unexpected dominant exclusion counts: %#v", explanation.DominantExclusionReasons)
 	}
 }

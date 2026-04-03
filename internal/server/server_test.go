@@ -181,6 +181,13 @@ func TestGetSessionReplayIncludesConsultEvents(t *testing.T) {
 			ByteBudget                int      `json:"byte_budget"`
 			ActualBytes               int      `json:"actual_bytes"`
 			Refs                      []string `json:"refs"`
+			Selection                 struct {
+				BudgetPressure           bool `json:"budget_pressure"`
+				DominantInclusionReasons []struct {
+					Reason string `json:"reason"`
+					Count  int    `json:"count"`
+				} `json:"dominant_inclusion_reasons"`
+			} `json:"selection"`
 		} `json:"consults"`
 	}
 	if err := json.Unmarshal(replayRec.Body.Bytes(), &out); err != nil {
@@ -195,6 +202,9 @@ func TestGetSessionReplayIncludesConsultEvents(t *testing.T) {
 	}
 	if got.ManifestSerializerVersion != "consult_manifest.v1" || got.ByteBudget <= 0 || got.ActualBytes <= 0 {
 		t.Fatalf("missing consult replay metadata: %#v", got)
+	}
+	if len(got.Selection.DominantInclusionReasons) == 0 {
+		t.Fatalf("missing replay selection metadata: %#v", got)
 	}
 }
 
@@ -360,14 +370,30 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 			PacketEventID   string `json:"packet_event_id"`
 			ResponseEventID string `json:"response_event_id"`
 			ConsultManifest struct {
-				SessionID         string            `json:"session_id"`
-				BranchID          string            `json:"branch_id"`
-				Fingerprint       string            `json:"fingerprint"`
-				Refs              []string          `json:"refs"`
-				Constraints       map[string]string `json:"constraints"`
-				ByteBudget        int               `json:"byte_budget"`
-				ActualBytes       int               `json:"actual_bytes"`
-				SerializerVersion string            `json:"serializer_version"`
+				SessionID     string            `json:"session_id"`
+				BranchID      string            `json:"branch_id"`
+				Fingerprint   string            `json:"fingerprint"`
+				Refs          []string          `json:"refs"`
+				Constraints   map[string]string `json:"constraints"`
+				SelectedItems []struct {
+					ID     string `json:"id"`
+					Kind   string `json:"kind"`
+					Reason string `json:"reason"`
+				} `json:"selected_items"`
+				Selection struct {
+					BudgetPressure           bool `json:"budget_pressure"`
+					DominantInclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_inclusion_reasons"`
+					DominantExclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_exclusion_reasons"`
+				} `json:"selection"`
+				ByteBudget        int    `json:"byte_budget"`
+				ActualBytes       int    `json:"actual_bytes"`
+				SerializerVersion string `json:"serializer_version"`
 			} `json:"consult_manifest"`
 		} `json:"trace"`
 	}
@@ -395,6 +421,15 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 	if out.Trace.ConsultManifest.SerializerVersion == "" {
 		t.Fatalf("missing consult serializer version: %#v", out.Trace.ConsultManifest)
 	}
+	if len(out.Trace.ConsultManifest.SelectedItems) == 0 {
+		t.Fatalf("expected selected items with reasons, got %#v", out.Trace.ConsultManifest)
+	}
+	if out.Trace.ConsultManifest.SelectedItems[0].Reason == "" {
+		t.Fatalf("expected selected item reason, got %#v", out.Trace.ConsultManifest.SelectedItems)
+	}
+	if len(out.Trace.ConsultManifest.Selection.DominantInclusionReasons) == 0 {
+		t.Fatalf("expected selection explanation on consult manifest, got %#v", out.Trace.ConsultManifest.Selection)
+	}
 
 	events, err := mem.ListEventsBySession(context.Background(), "s-agent")
 	if err != nil {
@@ -418,6 +453,9 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 	}
 	if consultEvent.Meta["manifest_serializer_version"] != "consult_manifest.v1" {
 		t.Fatalf("unexpected consult serializer meta: %#v", consultEvent.Meta)
+	}
+	if _, ok := consultEvent.Meta["selection"].(map[string]any); !ok {
+		t.Fatalf("expected consult selection meta, got %#v", consultEvent.Meta["selection"])
 	}
 }
 
@@ -659,8 +697,13 @@ func TestPostAgentCallResolvedFingerprintUsesNormalizedIntent(t *testing.T) {
 	if manifest1 == "" || manifest2 == "" {
 		t.Fatalf("expected consult manifests for resolved requests, got %q and %q", manifest1, manifest2)
 	}
-	if manifest1 != manifest2 {
-		t.Fatalf("expected identical manifests for equivalent normalized requests, got %s vs %s", manifest1, manifest2)
+	if manifest1 == manifest2 {
+		t.Fatalf("expected selector-aware manifests to reflect consult-local state, got identical manifests %s", manifest1)
+	}
+	for _, manifest := range []string{manifest1, manifest2} {
+		if !strings.Contains(manifest, `"selection"`) {
+			t.Fatalf("expected selector explanation in manifest, got %s", manifest)
+		}
 	}
 }
 
@@ -859,11 +902,24 @@ func TestPostAgentCallOverlappingDifferentRequestsDoNotCrossBleed(t *testing.T) 
 		CallFunc: func(ctx context.Context, req model.Request) ([]byte, error) {
 			atomic.AddInt32(&calls, 1)
 			time.Sleep(80 * time.Millisecond)
-			packet := string(req.Packet)
-			if strings.Contains(packet, "task: task-a") {
+			var packet struct {
+				WorkingSet []struct {
+					Text string `json:"text"`
+				} `json:"working_set"`
+			}
+			if err := json.Unmarshal(req.Packet, &packet); err != nil {
+				return nil, err
+			}
+			latest := ""
+			for _, item := range packet.WorkingSet {
+				if strings.HasPrefix(item.Text, "task: ") {
+					latest = item.Text
+				}
+			}
+			if strings.Contains(latest, "task-a") {
 				return []byte(`{"decision":"answer","answer":"answer-a"}`), nil
 			}
-			if strings.Contains(packet, "task: task-b") {
+			if strings.Contains(latest, "task-b") {
 				return []byte(`{"decision":"answer","answer":"answer-b"}`), nil
 			}
 			return []byte(`{"decision":"answer","answer":"unknown"}`), nil

@@ -95,7 +95,7 @@ func TestReplModeSwitchRoutesTextToAgentCall(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/agent-call":
 			io.Copy(io.Discard, r.Body)
-			_, _ = w.Write([]byte(`{"session_id":"s1","branch_id":"main","decision":"answer","resolved":true,"fingerprint":"abc","answer":"ok"}`))
+			_, _ = w.Write([]byte(`{"session_id":"s1","branch_id":"main","decision":"answer","resolved":true,"fingerprint":"abc","answer":"ok","trace":{"consult_manifest":{"selection":{"dominant_inclusion_reasons":[{"reason":"recent_turn","count":1}]}}}}`))
 		case "/v1/turn":
 			io.Copy(io.Discard, r.Body)
 			_, _ = w.Write([]byte(`{"session_id":"s1","branch_id":"main","decision":"answer","answer":"ok"}`))
@@ -204,7 +204,7 @@ func TestHandleAgentCompactOutputResolved(t *testing.T) {
 			"resolved":true,
 			"fingerprint":"1234567890abcdef",
 			"answer":"done",
-			"trace":{"consult_manifest":{"actual_bytes":640,"byte_budget":14336}}
+			"trace":{"consult_manifest":{"actual_bytes":640,"byte_budget":14336,"selection":{"dominant_inclusion_reasons":[{"reason":"recent_turn","count":1}],"dominant_exclusion_reasons":[{"reason":"non_local","count":1}],"budget_pressure":true}}}
 		}`))
 	})
 
@@ -224,6 +224,7 @@ func TestHandleAgentCompactOutputResolved(t *testing.T) {
 		"fp=1234567890ab",
 		"consult=yes",
 		"bytes=640/14336",
+		"selector[in=recent_turn ex=non_local pressure=yes]",
 		"answer=done",
 	} {
 		if !strings.Contains(got, want) {
@@ -279,8 +280,8 @@ func TestHandleReplayIncludesConsultSummaries(t *testing.T) {
 			"branches":{"main":"consult.resolved.leader.1"},
 			"state":{"event_count":5},
 			"consults":[
-				{"outcome":"resolved","role":"leader","branch_id":"main","fingerprint":"1234567890abcdef","actual_bytes":640,"byte_budget":14336},
-				{"outcome":"resolved","role":"follower","branch_id":"main","fingerprint":"1234567890abcdef","leader_consult_event_id":"consult.resolved.leader.1","actual_bytes":640,"byte_budget":14336}
+				{"outcome":"resolved","role":"leader","branch_id":"main","fingerprint":"1234567890abcdef","actual_bytes":640,"byte_budget":14336,"selection":{"dominant_inclusion_reasons":[{"reason":"recent_turn","count":1}],"dominant_exclusion_reasons":[{"reason":"non_local","count":1}],"budget_pressure":true}},
+				{"outcome":"resolved","role":"follower","branch_id":"main","fingerprint":"1234567890abcdef","leader_consult_event_id":"consult.resolved.leader.1","actual_bytes":640,"byte_budget":14336,"selection":{"dominant_inclusion_reasons":[{"reason":"recent_turn","count":1}]}}
 			]
 		}`))
 	})
@@ -298,8 +299,8 @@ func TestHandleReplayIncludesConsultSummaries(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"replay session=s1 events=5 branches=main consults=2",
-		"consult resolved role=leader branch=main fp=1234567890ab bytes=640/14336",
-		"consult resolved role=follower branch=main fp=1234567890ab bytes=640/14336 leader=consult.resolved.leader.1",
+		"consult resolved role=leader branch=main fp=1234567890ab bytes=640/14336 selector[in=recent_turn ex=non_local pressure=yes]",
+		"consult resolved role=follower branch=main fp=1234567890ab bytes=640/14336 leader=consult.resolved.leader.1 selector[in=recent_turn]",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected output to contain %q, got %q", want, got)
@@ -331,7 +332,7 @@ func TestRunVersionPrintsRelease(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("exit=%d stderr=%q", exit, errOut.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.3" {
+	if got := strings.TrimSpace(out.String()); got != "demo-cli 0.2.4" {
 		t.Fatalf("unexpected version output: %q", got)
 	}
 }

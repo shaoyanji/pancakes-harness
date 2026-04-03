@@ -13,7 +13,7 @@ This repository provides a thin core that:
 - assembles model-bound packets under a strict envelope budget
 - exposes a small local HTTP API (`/v1/turn`, `/v1/agent-call`, replay/health/metrics)
 
-Release line: `v0.2.3`
+Release line: `v0.2.4`
 
 This repository does not provide the full agent policy layer (approvals, sandbox policy, orchestration strategy, cluster scheduler, or UI).
 
@@ -40,6 +40,7 @@ Every resolved `/v1/agent-call` leaves a **durable consult event** on the local 
 - resolved vs unresolved outcome
 - leader vs follower coalescing role
 - selected refs and byte accounting
+- compact selector explanation for inclusion, exclusion, and budget-pressure signals
 - consult manifest serializer version when a manifest exists
 
 The response artifact (the immediate answer) answers the caller. The consult event is the receipt — the first-class replayable object. This is what makes the kernel reviewable: any past consult can be replayed, exported, or compared without re-executing the full step.
@@ -47,6 +48,15 @@ The response artifact (the immediate answer) answers the caller. The consult eve
 Consult manifest generation remains deterministic and stable, but it is a renderer-grade artifact derived from the same normalized boundary that produces the durable consult event.
 
 In `v0.2.3`, unresolved consults are durably recorded when the request has a stable branch identity. A branchless unresolved request such as missing `scope` remains response-local for now so the event spine does not fabricate branch identity or relax core event invariants.
+
+In `v0.2.4`, resolved consults also expose explainable egress selection. Each consult manifest and replayable consult event can now show:
+
+- which selected items entered the packet and why
+- a bounded excluded-item sample and why those items stayed out
+- dominant inclusion and exclusion reasons for the consult
+- whether budget pressure mattered before the final packet was sent
+
+The reason taxonomy stays compact and deterministic. This is explainable egress selection, not a retrieval framework.
 
 ## Architectural Invariants
 
@@ -205,7 +215,7 @@ EOF
 Example compact agent line:
 
 ```text
-[demo/main] agent resolved fp=4fb0d5a1e2c3 consult=yes bytes=640/14336 answer=...
+[demo/main] agent resolved fp=4fb0d5a1e2c3 consult=yes bytes=640/14336 selector[in=recent_turn ex=non_local pressure=yes] answer=...
 ```
 
 ### Demo flow: agent-call unresolved

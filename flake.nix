@@ -15,7 +15,7 @@
           inherit system;
         };
         lib = pkgs.lib;
-        version = "0.2.2";
+        version = "0.2.4";
 
         # Canonical Go toolchain for this project (matches go.mod: go 1.23)
         go = pkgs.go_1_23;

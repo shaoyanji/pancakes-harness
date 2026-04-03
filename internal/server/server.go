@@ -14,6 +14,7 @@ import (
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/consult"
+	"pancakes-harness/internal/egress"
 	"pancakes-harness/internal/eventlog"
 	ingressctrl "pancakes-harness/internal/ingress"
 	"pancakes-harness/internal/metrics"
@@ -358,12 +359,6 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	externalContext := ingressReq.NormalizedExternalContext()
-	manifest, err := buildConsultManifest(req.SessionID, branch, fingerprint, pfResult, task)
-	if err != nil {
-		s.cfg.Metrics.IncError(route)
-		writeJSONError(w, http.StatusInternalServerError, "consult_manifest_failed", err.Error())
-		return
-	}
 
 	ticket := s.inflight.Enter(fingerprint)
 	if !ticket.Leader() {
@@ -397,6 +392,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 				Outcome:                   consult.OutcomeResolved,
 				Role:                      consult.RoleFollower,
 				LeaderConsultEventID:      out.ConsultEventID,
+				Selection:                 consultSelection(out.Response),
 			}); err != nil {
 				s.cfg.Metrics.IncError(route)
 				writeJSONError(w, http.StatusInternalServerError, "consult_event_failed", err.Error())
@@ -454,6 +450,18 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	trace := s.findTrace(req.SessionID, branch)
+	manifest, err := buildConsultManifest(req.SessionID, branch, fingerprint, pfResult, task, res.Selected, res.SelectionExplanation)
+	if err != nil {
+		s.cfg.Metrics.IncError(route)
+		out := coalescedAgentCallResult{
+			Status:       http.StatusInternalServerError,
+			ErrorCode:    "consult_manifest_failed",
+			ErrorMessage: err.Error(),
+		}
+		publish(out)
+		writeCoalescedAgentCallResult(w, out)
+		return
+	}
 	trace.ConsultManifest = &manifest
 	resp := agentCallResponse{
 		SessionID:     res.SessionID,
@@ -480,6 +488,7 @@ func (s *Server) handleAgentCall(w http.ResponseWriter, r *http.Request) {
 		TaskSummary:               task,
 		Outcome:                   consult.OutcomeResolved,
 		Role:                      consult.RoleLeader,
+		Selection:                 manifest.Selection,
 	})
 	if err != nil {
 		s.cfg.Metrics.IncError(route)
@@ -756,16 +765,7 @@ func buildAgentCallText(task string, refs []string, constraints map[string]strin
 	return strings.Join(lines, "\n"), nil
 }
 
-func buildConsultManifest(sessionID, branchID, fingerprint string, pf preflight.Result, task string) (consult.Manifest, error) {
-	selected := make([]consult.SelectedItem, 0, len(pf.Refs))
-	for _, ref := range pf.Refs {
-		selected = append(selected, consult.SelectedItem{
-			ID:    ref,
-			Kind:  "ref",
-			Ref:   ref,
-			Bytes: len(ref),
-		})
-	}
+func buildConsultManifest(sessionID, branchID, fingerprint string, pf preflight.Result, task string, selected []egress.Selected, explanation *egress.Explanation) (consult.Manifest, error) {
 	return consult.Generate(consult.Input{
 		SessionID:     sessionID,
 		BranchID:      branchID,
@@ -774,11 +774,12 @@ func buildConsultManifest(sessionID, branchID, fingerprint string, pf preflight.
 		Scope:         pf.Scope,
 		Refs:          pf.Refs,
 		Constraints:   pf.Constraints,
-		SelectedItems: selected,
+		SelectedItems: consultSelectedItems(selected),
 		ByteBudget:    assembler.MaxEnvelopeBytes,
 		Compacted:     false,
 		Truncated:     false,
 		TaskSummary:   task,
+		Selection:     consultSelectionExplanation(explanation),
 	})
 }
 
@@ -829,6 +830,7 @@ type consultEventRecord struct {
 	Outcome                   string
 	Role                      string
 	Missing                   []string
+	Selection                 *consult.SelectionExplanation
 }
 
 func (s *Server) appendConsultEvent(ctx context.Context, rec consultEventRecord) (string, error) {
@@ -856,6 +858,7 @@ func (s *Server) appendConsultEvent(ctx context.Context, rec consultEventRecord)
 			ActualBytes:               rec.ActualBytes,
 			TaskSummary:               rec.TaskSummary,
 			Missing:                   rec.Missing,
+			Selection:                 rec.Selection,
 		}.Meta(),
 	}
 	if err := s.cfg.Backend.AppendEvent(ctx, ev); err != nil {
@@ -902,4 +905,86 @@ func consultTaskSummary(resp *agentCallResponse) string {
 		return ""
 	}
 	return resp.Trace.ConsultManifest.TaskSummary
+}
+
+func consultSelection(resp *agentCallResponse) *consult.SelectionExplanation {
+	if resp == nil || resp.Trace.ConsultManifest == nil {
+		return nil
+	}
+	return resp.Trace.ConsultManifest.Selection
+}
+
+func consultSelectedItems(selected []egress.Selected) []consult.SelectedItem {
+	if len(selected) == 0 {
+		return nil
+	}
+	out := make([]consult.SelectedItem, 0, len(selected))
+	for _, item := range selected {
+		if !item.Include {
+			continue
+		}
+		bytes := len(item.Text) + len(item.SummaryRef) + len(item.BlobRef)
+		next := consult.SelectedItem{
+			ID:         item.ID,
+			Kind:       item.Kind,
+			SummaryRef: item.SummaryRef,
+			Bytes:      bytes,
+			Reason:     string(item.Reason),
+		}
+		if item.BlobRef != "" {
+			next.Ref = item.BlobRef
+		}
+		out = append(out, next)
+	}
+	return out
+}
+
+func consultSelectionExplanation(explanation *egress.Explanation) *consult.SelectionExplanation {
+	if explanation == nil {
+		return nil
+	}
+	out := &consult.SelectionExplanation{
+		BudgetPressure: explanation.BudgetPressure,
+	}
+	if len(explanation.Included) > 0 {
+		out.Included = make([]consult.SelectionItem, 0, len(explanation.Included))
+		for _, item := range explanation.Included {
+			out.Included = append(out.Included, consult.SelectionItem{
+				ID:     item.ID,
+				Kind:   item.Kind,
+				Reason: string(item.Reason),
+				Class:  string(item.Class),
+			})
+		}
+	}
+	if len(explanation.Excluded) > 0 {
+		out.Excluded = make([]consult.SelectionItem, 0, len(explanation.Excluded))
+		for _, item := range explanation.Excluded {
+			out.Excluded = append(out.Excluded, consult.SelectionItem{
+				ID:     item.ID,
+				Kind:   item.Kind,
+				Reason: string(item.Reason),
+				Class:  string(item.Class),
+			})
+		}
+	}
+	if len(explanation.DominantInclusionReasons) > 0 {
+		out.DominantInclusionReasons = make([]consult.ReasonCount, 0, len(explanation.DominantInclusionReasons))
+		for _, reason := range explanation.DominantInclusionReasons {
+			out.DominantInclusionReasons = append(out.DominantInclusionReasons, consult.ReasonCount{
+				Reason: string(reason.Reason),
+				Count:  reason.Count,
+			})
+		}
+	}
+	if len(explanation.DominantExclusionReasons) > 0 {
+		out.DominantExclusionReasons = make([]consult.ReasonCount, 0, len(explanation.DominantExclusionReasons))
+		for _, reason := range explanation.DominantExclusionReasons {
+			out.DominantExclusionReasons = append(out.DominantExclusionReasons, consult.ReasonCount{
+				Reason: string(reason.Reason),
+				Count:  reason.Count,
+			})
+		}
+	}
+	return out
 }

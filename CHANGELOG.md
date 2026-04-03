@@ -1,5 +1,48 @@
 # CHANGELOG
 
+## v0.2.4
+
+Release date: 2026-04-03
+
+pancakes-harness v0.2.4 is explainable egress selection.
+
+This release deepens the consult kernel without widening it into retrieval machinery. Resolved consults now carry a compact, machine-readable selector explanation that makes pre-compaction selection auditable before packet assembly disappears behind a provider call.
+
+Resolved consult manifests and replayable consult events now expose:
+
+- per-selected-item inclusion reasons
+- a bounded excluded-item sample with exclusion reasons
+- dominant inclusion and exclusion signals for the consult overall
+- a narrow budget-pressure flag when selection had to survive compaction pressure
+
+The reason taxonomy stays stable and narrow. The shipped codes reflect only signals the current selector actually computes, including:
+
+- `branch_locality`
+- `recent_turn`
+- `tool_result`
+- `summary_checkpoint`
+- `checkpoint_ref`
+- `global_relevant`
+- `budget_fit`
+- `debug_never`
+- `non_local`
+- `sensitive_local`
+- `ref_unavailable`
+
+Replay, demo, and benchmark-reporting surfaces now summarize selector behavior without dumping giant candidate lists or contaminating outbound packets with explainability payloads. `/v1/turn` remains unchanged.
+
+What this release does not do:
+
+- no smart-retrieval framework
+- no LLM-ranked selection layer
+- no plugin or policy system
+- no broad public API redesign
+- no giant selector dumps
+
+Intentional deferral:
+
+full serializer unification across consult manifest and consult event models remains a `v0.2.5` task, and local export/review remains a later thin-surface pass.
+
 ## v0.2.3
 
 Release date: 2026-04-03

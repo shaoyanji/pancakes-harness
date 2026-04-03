@@ -52,11 +52,13 @@ type Session struct {
 }
 
 type TurnResult struct {
-	SessionID           string
-	BranchID            string
-	Answer              string
-	Decision            string
-	PacketEnvelopeBytes int
+	SessionID            string
+	BranchID             string
+	Answer               string
+	Decision             string
+	PacketEnvelopeBytes  int
+	Selected             []egress.Selected
+	SelectionExplanation *egress.Explanation
 }
 
 type ReplayResult struct {
@@ -127,14 +129,18 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 	}
 
 	var lastPacketBytes int
+	var lastSelected []egress.Selected
+	var lastExplanation egress.Explanation
 	for i := 0; i < s.maxReasoningTurns; i++ {
 		assembleStarted := time.Now()
-		packet, err := s.assembleForBranch(ctx, branchID, externalContext)
+		packet, selected, explanation, err := s.assembleForBranch(ctx, branchID, externalContext)
 		if err != nil {
 			return TurnResult{}, err
 		}
 		s.observeLatency("packet_assembly_ms", time.Since(assembleStarted))
 		lastPacketBytes = packet.Measurement.EnvelopeBytes
+		lastSelected = append(lastSelected[:0], selected...)
+		lastExplanation = explanation
 		s.observeEnvelopeBytes(packet.Measurement.EnvelopeBytes)
 		s.observeBodyBytes(len(packet.BodyJSON))
 		s.incCompactionStage(packet.Stage)
@@ -190,11 +196,13 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 				return TurnResult{}, err
 			}
 			return TurnResult{
-				SessionID:           s.id,
-				BranchID:            branchID,
-				Answer:              callResult.Response.Answer,
-				Decision:            callResult.Response.Decision,
-				PacketEnvelopeBytes: lastPacketBytes,
+				SessionID:            s.id,
+				BranchID:             branchID,
+				Answer:               callResult.Response.Answer,
+				Decision:             callResult.Response.Decision,
+				PacketEnvelopeBytes:  lastPacketBytes,
+				Selected:             append([]egress.Selected(nil), lastSelected...),
+				SelectionExplanation: cloneExplanation(lastExplanation),
 			}, nil
 		case "tool_calls":
 			if err := s.executeToolCalls(ctx, branchID, callResult.Response.ToolCalls); err != nil {
@@ -263,10 +271,10 @@ func (s *Session) ReplaySession(ctx context.Context) (ReplayResult, error) {
 	return ReplayResult{SessionState: state, Branches: heads}, nil
 }
 
-func (s *Session) assembleForBranch(ctx context.Context, branchID, externalContext string) (assembler.Result, error) {
+func (s *Session) assembleForBranch(ctx context.Context, branchID, externalContext string) (assembler.Result, []egress.Selected, egress.Explanation, error) {
 	sessionEvents, err := s.backendListEventsBySession(ctx, s.id)
 	if err != nil {
-		return assembler.Result{}, err
+		return assembler.Result{}, nil, egress.Explanation{}, err
 	}
 
 	latestUserID := ""
@@ -331,7 +339,7 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 		candidates = append(candidates, cand)
 	}
 
-	selected := egress.Select(candidates)
+	selected, explanation := egress.SelectWithExplanation(candidates)
 	working := make([]assembler.WorkingItem, 0, len(selected))
 	for _, sel := range selected {
 		if !sel.Include {
@@ -372,8 +380,10 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 		}
 		s.incPacketBudgetRejection()
 		_ = s.backendAppendEvent(ctx, rej)
-		return assembler.Result{}, ErrPacketBudgetRejected
+		return assembler.Result{}, nil, egress.Explanation{}, ErrPacketBudgetRejected
 	}
+	explanation.BudgetPressure = packet.Stage > 0 || packet.ExternalContextStatus == "dropped_budget"
+	s.observeSelectionExplanation(explanation)
 
 	candidate := eventlog.Event{
 		ID:        s.nextEventID("packet.candidate"),
@@ -389,9 +399,13 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 		},
 	}
 	if err := s.backendAppendEvent(ctx, candidate); err != nil {
-		return assembler.Result{}, err
+		return assembler.Result{}, nil, egress.Explanation{}, err
 	}
-	return packet, nil
+	cloned := cloneExplanation(explanation)
+	if cloned == nil {
+		return packet, append([]egress.Selected(nil), selected...), egress.Explanation{}, nil
+	}
+	return packet, append([]egress.Selected(nil), selected...), *cloned, nil
 }
 
 func (s *Session) executeToolCalls(ctx context.Context, branchID string, calls []model.ToolCall) error {
@@ -525,4 +539,30 @@ func (s *Session) incPacketBudgetRejection() {
 	if s.metrics != nil {
 		s.metrics.IncPacketBudgetRejection()
 	}
+}
+
+func (s *Session) observeSelectionExplanation(explanation egress.Explanation) {
+	if s.metrics == nil {
+		return
+	}
+	for _, reason := range explanation.DominantInclusionReasons {
+		s.metrics.IncSelectorInclusionReason(string(reason.Reason), reason.Count)
+	}
+	for _, reason := range explanation.DominantExclusionReasons {
+		s.metrics.IncSelectorExclusionReason(string(reason.Reason), reason.Count)
+	}
+	if explanation.BudgetPressure {
+		s.metrics.IncSelectorBudgetPressure()
+	}
+}
+
+func cloneExplanation(in egress.Explanation) *egress.Explanation {
+	out := egress.Explanation{
+		BudgetPressure:           in.BudgetPressure,
+		Included:                 append([]egress.ItemReason(nil), in.Included...),
+		Excluded:                 append([]egress.ItemReason(nil), in.Excluded...),
+		DominantInclusionReasons: append([]egress.ReasonCount(nil), in.DominantInclusionReasons...),
+		DominantExclusionReasons: append([]egress.ReasonCount(nil), in.DominantExclusionReasons...),
+	}
+	return &out
 }

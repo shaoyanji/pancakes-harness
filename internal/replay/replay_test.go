@@ -329,6 +329,21 @@ func TestListConsultEventsSurfacesResolvedAndFollowerState(t *testing.T) {
 				ByteBudget:                14336,
 				ActualBytes:               640,
 				TaskSummary:               "summarize latest state",
+				Selection: &consult.SelectionExplanation{
+					Included: []consult.SelectionItem{
+						{ID: "s-consult.000001.turn.user", Kind: "turn.user", Reason: "recent_turn", Class: "passthrough"},
+					},
+					Excluded: []consult.SelectionItem{
+						{ID: "sibling.1", Kind: "turn.agent", Reason: "non_local", Class: "drop_unless_asked"},
+					},
+					DominantInclusionReasons: []consult.ReasonCount{
+						{Reason: "recent_turn", Count: 1},
+					},
+					DominantExclusionReasons: []consult.ReasonCount{
+						{Reason: "non_local", Count: 2},
+					},
+					BudgetPressure: true,
+				},
 			}.Meta(),
 		},
 		{
@@ -368,5 +383,11 @@ func TestListConsultEventsSurfacesResolvedAndFollowerState(t *testing.T) {
 	}
 	if consults[0].ByteBudget != 14336 || consults[0].ActualBytes != 640 {
 		t.Fatalf("unexpected byte accounting: %#v", consults[0])
+	}
+	if consults[0].Selection == nil || !consults[0].Selection.BudgetPressure {
+		t.Fatalf("expected replay selection explanation, got %#v", consults[0].Selection)
+	}
+	if got := consults[0].Selection.DominantExclusionReasons; len(got) != 1 || got[0].Reason != "non_local" || got[0].Count != 2 {
+		t.Fatalf("unexpected replay selection reasons: %#v", got)
 	}
 }

@@ -22,7 +22,7 @@ const (
 	modeAgent mode = "agent"
 )
 
-const releaseVersion = "0.2.3"
+const releaseVersion = "0.2.4"
 
 type config struct {
 	addr      string
@@ -309,6 +309,17 @@ func (c *cli) handleAgent(task string) error {
 			ConsultManifest *struct {
 				ActualBytes int `json:"actual_bytes"`
 				ByteBudget  int `json:"byte_budget"`
+				Selection   *struct {
+					BudgetPressure           bool `json:"budget_pressure"`
+					DominantInclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_inclusion_reasons"`
+					DominantExclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_exclusion_reasons"`
+				} `json:"selection"`
 			} `json:"consult_manifest"`
 		} `json:"trace"`
 	}
@@ -330,6 +341,7 @@ func (c *cli) handleAgent(task string) error {
 		}
 		c.lastManifest = append([]byte(nil), raw...)
 	}
+	selectorSummary := selectorSummaryFromManifest(out.Trace.ConsultManifest)
 
 	if !out.Resolved {
 		missing := strings.Join(out.Missing, ",")
@@ -340,14 +352,14 @@ func (c *cli) handleAgent(task string) error {
 		if contract == "" {
 			contract = "agent_call.v1"
 		}
-		fmt.Fprintf(c.out, "[%s/%s] agent unresolved fp=%s contract=%s consult=%s missing=%s\n", out.SessionID, out.BranchID, fp, contract, consult, missing)
+		fmt.Fprintf(c.out, "[%s/%s] agent unresolved fp=%s contract=%s consult=%s missing=%s%s\n", out.SessionID, out.BranchID, fp, contract, consult, missing, selectorSummary)
 		return nil
 	}
 	contract := out.Contract
 	if contract == "" {
 		contract = "agent_call.v1"
 	}
-	fmt.Fprintf(c.out, "[%s/%s] agent resolved fp=%s contract=%s consult=%s bytes=%s answer=%s\n", out.SessionID, out.BranchID, fp, contract, consult, bytesSummary, out.Answer)
+	fmt.Fprintf(c.out, "[%s/%s] agent resolved fp=%s contract=%s consult=%s bytes=%s%s answer=%s\n", out.SessionID, out.BranchID, fp, contract, consult, bytesSummary, selectorSummary, out.Answer)
 	return nil
 }
 
@@ -405,6 +417,17 @@ func (c *cli) handleReplay() error {
 			Missing              []string `json:"missing"`
 			ByteBudget           int      `json:"byte_budget"`
 			ActualBytes          int      `json:"actual_bytes"`
+			Selection            *struct {
+				BudgetPressure           bool `json:"budget_pressure"`
+				DominantInclusionReasons []struct {
+					Reason string `json:"reason"`
+					Count  int    `json:"count"`
+				} `json:"dominant_inclusion_reasons"`
+				DominantExclusionReasons []struct {
+					Reason string `json:"reason"`
+					Count  int    `json:"count"`
+				} `json:"dominant_exclusion_reasons"`
+			} `json:"selection"`
 		} `json:"consults"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -430,6 +453,7 @@ func (c *cli) handleReplay() error {
 		if consult.LeaderConsultEventID != "" {
 			line += " leader=" + consult.LeaderConsultEventID
 		}
+		line += selectorSummaryFromSelection(consult.Selection)
 		fmt.Fprintln(c.out, line)
 	}
 	return nil
@@ -455,10 +479,11 @@ func (c *cli) handleManifest() error {
 				Refs          []string          `json:"refs"`
 				Constraints   map[string]string `json:"constraints"`
 				SelectedItems []struct {
-					ID    string `json:"id"`
-					Kind  string `json:"kind"`
-					Ref   string `json:"ref"`
-					Bytes int    `json:"bytes"`
+					ID     string `json:"id"`
+					Kind   string `json:"kind"`
+					Ref    string `json:"ref"`
+					Bytes  int    `json:"bytes"`
+					Reason string `json:"reason"`
 				} `json:"selected_items"`
 				ByteBudget        int    `json:"byte_budget"`
 				ActualBytes       int    `json:"actual_bytes"`
@@ -466,6 +491,25 @@ func (c *cli) handleManifest() error {
 				Truncated         bool   `json:"truncated"`
 				SerializerVersion string `json:"serializer_version"`
 				TaskSummary       string `json:"task_summary"`
+				Selection         *struct {
+					Included []struct {
+						ID     string `json:"id"`
+						Reason string `json:"reason"`
+					} `json:"included"`
+					Excluded []struct {
+						ID     string `json:"id"`
+						Reason string `json:"reason"`
+					} `json:"excluded"`
+					DominantInclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_inclusion_reasons"`
+					DominantExclusionReasons []struct {
+						Reason string `json:"reason"`
+						Count  int    `json:"count"`
+					} `json:"dominant_exclusion_reasons"`
+					BudgetPressure bool `json:"budget_pressure"`
+				} `json:"selection"`
 			} `json:"consult_manifest"`
 		} `json:"trace"`
 	}
@@ -485,6 +529,18 @@ func (c *cli) handleManifest() error {
 	fmt.Fprintf(c.out, "  refs=%s\n", strings.Join(m.Refs, ", "))
 	fmt.Fprintf(c.out, "  items=%d budget=%d actual=%d compacted=%v truncated=%v\n", len(m.SelectedItems), m.ByteBudget, m.ActualBytes, m.Compacted, m.Truncated)
 	fmt.Fprintf(c.out, "  serializer=%s\n", m.SerializerVersion)
+	for _, item := range m.SelectedItems {
+		if item.Reason == "" {
+			continue
+		}
+		fmt.Fprintf(c.out, "  selected %s=%s\n", item.ID, item.Reason)
+	}
+	if m.Selection != nil {
+		fmt.Fprintf(c.out, "  selector%s\n", selectorSummaryFromManifestSelection(m.Selection))
+		for _, item := range m.Selection.Excluded {
+			fmt.Fprintf(c.out, "  excluded %s=%s\n", item.ID, item.Reason)
+		}
+	}
 	if len(m.Constraints) > 0 {
 		fmt.Fprintf(c.out, "  constraints:\n")
 		for k, v := range m.Constraints {
@@ -492,6 +548,95 @@ func (c *cli) handleManifest() error {
 		}
 	}
 	return nil
+}
+
+func selectorSummaryFromManifest(manifest *struct {
+	ActualBytes int `json:"actual_bytes"`
+	ByteBudget  int `json:"byte_budget"`
+	Selection   *struct {
+		BudgetPressure           bool `json:"budget_pressure"`
+		DominantInclusionReasons []struct {
+			Reason string `json:"reason"`
+			Count  int    `json:"count"`
+		} `json:"dominant_inclusion_reasons"`
+		DominantExclusionReasons []struct {
+			Reason string `json:"reason"`
+			Count  int    `json:"count"`
+		} `json:"dominant_exclusion_reasons"`
+	} `json:"selection"`
+}) string {
+	if manifest == nil {
+		return ""
+	}
+	return selectorSummaryFromSelection(manifest.Selection)
+}
+
+func selectorSummaryFromSelection(selection *struct {
+	BudgetPressure           bool `json:"budget_pressure"`
+	DominantInclusionReasons []struct {
+		Reason string `json:"reason"`
+		Count  int    `json:"count"`
+	} `json:"dominant_inclusion_reasons"`
+	DominantExclusionReasons []struct {
+		Reason string `json:"reason"`
+		Count  int    `json:"count"`
+	} `json:"dominant_exclusion_reasons"`
+}) string {
+	if selection == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if len(selection.DominantInclusionReasons) > 0 && selection.DominantInclusionReasons[0].Reason != "" {
+		parts = append(parts, "in="+selection.DominantInclusionReasons[0].Reason)
+	}
+	if len(selection.DominantExclusionReasons) > 0 && selection.DominantExclusionReasons[0].Reason != "" {
+		parts = append(parts, "ex="+selection.DominantExclusionReasons[0].Reason)
+	}
+	if selection.BudgetPressure {
+		parts = append(parts, "pressure=yes")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " selector[" + strings.Join(parts, " ") + "]"
+}
+
+func selectorSummaryFromManifestSelection(selection *struct {
+	Included []struct {
+		ID     string `json:"id"`
+		Reason string `json:"reason"`
+	} `json:"included"`
+	Excluded []struct {
+		ID     string `json:"id"`
+		Reason string `json:"reason"`
+	} `json:"excluded"`
+	DominantInclusionReasons []struct {
+		Reason string `json:"reason"`
+		Count  int    `json:"count"`
+	} `json:"dominant_inclusion_reasons"`
+	DominantExclusionReasons []struct {
+		Reason string `json:"reason"`
+		Count  int    `json:"count"`
+	} `json:"dominant_exclusion_reasons"`
+	BudgetPressure bool `json:"budget_pressure"`
+}) string {
+	if selection == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if len(selection.DominantInclusionReasons) > 0 && selection.DominantInclusionReasons[0].Reason != "" {
+		parts = append(parts, "in="+selection.DominantInclusionReasons[0].Reason)
+	}
+	if len(selection.DominantExclusionReasons) > 0 && selection.DominantExclusionReasons[0].Reason != "" {
+		parts = append(parts, "ex="+selection.DominantExclusionReasons[0].Reason)
+	}
+	if selection.BudgetPressure {
+		parts = append(parts, "pressure=yes")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func (c *cli) handleTrace() error {
@@ -593,7 +738,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func usage() string {
-	return `demo-cli 0.2.3
+	return `demo-cli 0.2.4
 
 Thin demo shell over the pancakes-harness HTTP API.
 It does not add runtime logic or expand the kernel surface.
