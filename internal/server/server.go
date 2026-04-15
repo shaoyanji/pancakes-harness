@@ -12,17 +12,21 @@ import (
 	"time"
 
 	"pancakes-harness/internal/assembler"
+	"pancakes-harness/internal/audit"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/consult"
+	"pancakes-harness/internal/dream"
 	"pancakes-harness/internal/egress"
 	"pancakes-harness/internal/eventlog"
 	ingressctrl "pancakes-harness/internal/ingress"
+	"pancakes-harness/internal/memory"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/preflight"
 	"pancakes-harness/internal/replay"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/tools"
+	"pancakes-harness/internal/tooling"
 )
 
 // agentCallContractVersion is the contract version for /v1/agent-call responses.
@@ -41,6 +45,12 @@ type Config struct {
 	Metrics      *metrics.Registry
 	BackendMode  string
 	ModelMode    string
+
+	// New v0.3.0 fields
+	MemoryManager  *memory.Manager
+	DreamDaemon    *dream.Daemon
+	AuditConfig    audit.Config
+	ToolRegistry   *tooling.Registry
 }
 
 type Server struct {
@@ -61,6 +71,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Metrics == nil {
 		cfg.Metrics = metrics.NewRegistry()
 	}
+	if cfg.MemoryManager == nil {
+		cfg.MemoryManager = memory.NewManager(memory.Config{})
+	}
+	if cfg.ToolRegistry == nil {
+		cfg.ToolRegistry = tooling.NewRegistry()
+	}
 	cfg.Metrics.SetModes(cfg.BackendMode, cfg.ModelMode)
 	return &Server{cfg: cfg, inflight: ingressctrl.NewInflight()}, nil
 }
@@ -73,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/agent-call", s.handleAgentCall)
 	mux.HandleFunc("/v1/branch/fork", s.handleBranchFork)
 	mux.HandleFunc("/v1/session/", s.handleSessionReplay)
+	mux.HandleFunc("/v1/dream", s.handleDream)
 	return mux
 }
 
@@ -167,6 +184,20 @@ type backendDiagnostic struct {
 	Code    string            `json:"code"`
 	Message string            `json:"message"`
 	Details map[string]string `json:"details,omitempty"`
+}
+
+type dreamRequest struct {
+	SessionID string `json:"session_id,omitempty"`
+	Trigger   bool   `json:"trigger,omitempty"`
+}
+
+type dreamResponse struct {
+	OK              bool               `json:"ok"`
+	Triggered       bool               `json:"triggered"`
+	Result          *dream.DreamResult `json:"result,omitempty"`
+	Reason          string             `json:"reason,omitempty"`
+	DreamCount      int64              `json:"dream_count"`
+	DreamEnabled    bool               `json:"dream_enabled"`
 }
 
 type errorResponse struct {
@@ -644,6 +675,100 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.cfg.Metrics.Snapshot())
+}
+
+func (s *Server) handleDream(w http.ResponseWriter, r *http.Request) {
+	const route = "/v1/dream"
+	s.cfg.Metrics.IncRequest(route)
+	started := time.Now()
+	defer s.cfg.Metrics.ObserveLatency("dream_latency_ms", time.Since(started))
+
+	if r.Method != http.MethodPost {
+		s.cfg.Metrics.IncError(route)
+		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+
+	dreamEnabled := s.cfg.DreamDaemon != nil
+
+	var req dreamRequest
+	if r.ContentLength > 0 {
+		if err := decodeJSONBody(r, &req); err != nil {
+			s.cfg.Metrics.IncError(route)
+			writeJSONError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+	}
+
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID == "" {
+		sessionID = "demo"
+	}
+
+	// If trigger=true, force execute regardless of thresholds
+	if req.Trigger {
+		if s.cfg.DreamDaemon == nil {
+			writeJSON(w, http.StatusOK, dreamResponse{
+				OK:           false,
+				Triggered:    false,
+				Reason:       "dream daemon not configured",
+				DreamEnabled: false,
+			})
+			return
+		}
+		result, err := s.cfg.DreamDaemon.Execute(r.Context(), sessionID)
+		if err != nil {
+			s.cfg.Metrics.IncError(route)
+			writeJSON(w, http.StatusOK, dreamResponse{
+				OK:           false,
+				Triggered:    true,
+				Reason:       err.Error(),
+				DreamEnabled: dreamEnabled,
+			})
+			return
+		}
+		s.cfg.Metrics.IncDreamExecution()
+		writeJSON(w, http.StatusOK, dreamResponse{
+			OK:           true,
+			Triggered:    true,
+			Result:       result,
+			DreamCount:   s.cfg.DreamDaemon.DreamCount(),
+			DreamEnabled: dreamEnabled,
+		})
+		return
+	}
+
+	// Normal check: only execute if daemon says it should dream
+	if s.cfg.DreamDaemon == nil || !s.cfg.DreamDaemon.ShouldDream() {
+		writeJSON(w, http.StatusOK, dreamResponse{
+			OK:           true,
+			Triggered:    false,
+			Reason:       "dream thresholds not met",
+			DreamCount:   s.cfg.DreamDaemon.DreamCount(),
+			DreamEnabled: dreamEnabled,
+		})
+		return
+	}
+
+	result, err := s.cfg.DreamDaemon.Execute(r.Context(), sessionID)
+	if err != nil {
+		s.cfg.Metrics.IncError(route)
+		writeJSON(w, http.StatusOK, dreamResponse{
+			OK:           false,
+			Triggered:    true,
+			Reason:       err.Error(),
+			DreamEnabled: dreamEnabled,
+		})
+		return
+	}
+	s.cfg.Metrics.IncDreamExecution()
+	writeJSON(w, http.StatusOK, dreamResponse{
+		OK:           true,
+		Triggered:    true,
+		Result:       result,
+		DreamCount:   s.cfg.DreamDaemon.DreamCount(),
+		DreamEnabled: dreamEnabled,
+	})
 }
 
 func (s *Server) startSession(sessionID, defaultBranchID string) (*runtime.Session, error) {

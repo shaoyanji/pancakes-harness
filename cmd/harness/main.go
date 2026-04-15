@@ -13,13 +13,18 @@ import (
 	"time"
 
 	"pancakes-harness/internal/assembler"
+	"pancakes-harness/internal/audit"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/backend/xs"
+	"pancakes-harness/internal/dream"
+	"pancakes-harness/internal/eventlog"
+	"pancakes-harness/internal/memory"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/server"
 	"pancakes-harness/internal/tools"
+	"pancakes-harness/internal/tooling"
 )
 
 const (
@@ -37,6 +42,17 @@ const (
 	envXSCommand       = "HARNESS_XS_COMMAND"
 	envServeBind       = "HARNESS_SERVE_BIND"
 	envServePort       = "HARNESS_SERVE_PORT"
+
+	// New v0.3.0 env vars
+	envDreamEnabled        = "DREAM_ENABLED"
+	envDreamInactivityHrs  = "DREAM_INACTIVITY_HOURS"
+	envDreamMinSessions    = "DREAM_MIN_SESSIONS"
+	envDreamTopicDir       = "DREAM_TOPIC_DIR"
+	envMaxTokensPerConsult = "MAX_TOKENS_PER_CONSULT"
+	envAutoTerminateAudit  = "AUTO_TERMINATE_ON_AUDIT_COMPLETE"
+	envMemoryIndexSize     = "MEMORY_INDEX_SIZE"
+	envCompactionTurns     = "COMPACTION_TURNS"
+	envCompactionRatio     = "COMPACTION_RATIO"
 )
 
 var (
@@ -46,7 +62,7 @@ var (
 	errUnsupportedBackend   = errors.New("unsupported backend mode")
 )
 
-const releaseVersion = "0.2.4"
+const releaseVersion = "0.3.1"
 
 type launcherConfig struct {
 	modelMode      string
@@ -61,6 +77,17 @@ type launcherConfig struct {
 	xsCommand   string
 	sessionID   string
 	branchID    string
+
+	// New v0.3.0 fields
+	dreamEnabled        bool
+	dreamInactivityHrs  int
+	dreamMinSessions    int
+	dreamTopicDir       string
+	maxTokensPerConsult int
+	autoTerminateAudit  bool
+	memoryIndexSize     int
+	compactionTurns     int
+	compactionRatio     float64
 }
 
 type serveConfig struct {
@@ -162,15 +189,28 @@ func runServe(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		return 2
 	}
 
+	// Initialize new v0.3.0 components
+	memMgr := buildMemoryManager(cfg.launcher)
+	dreamDaemon := buildDreamDaemon(cfg.launcher, memMgr, backendEventLog{b})
+	auditCfg := buildAuditConfig(cfg.launcher)
+	toolReg := tooling.NewRegistry()
+	tooling.RegisterBuiltinTools(toolReg)
+
+	metricsReg := metrics.NewRegistry()
+
 	api, err := server.New(server.Config{
 		Backend:      b,
 		ModelAdapter: adapter,
 		ToolRunner:   tools.NewRunner(nil),
 		ModelHeaders: buildModelHeaders(cfg.launcher),
 		Timeout:      cfg.launcher.modelTimeout,
-		Metrics:      metrics.NewRegistry(),
+		Metrics:      metricsReg,
 		BackendMode:  cfg.launcher.backendMode,
 		ModelMode:    cfg.launcher.modelMode,
+		MemoryManager: memMgr,
+		DreamDaemon:   dreamDaemon,
+		AuditConfig:   auditCfg,
+		ToolRegistry:  toolReg,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "server init error: %v\n", err)
@@ -255,6 +295,17 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 		return parsedFlags{}, err
 	}
 
+	// New v0.3.0 defaults
+	dreamEnabledDefault := parseBoolOrDefault(getenv(envDreamEnabled), false)
+	dreamInactivityHrsDefault, _ := parseIntOrDefault(getenv(envDreamInactivityHrs), 24)
+	dreamMinSessionsDefault, _ := parseIntOrDefault(getenv(envDreamMinSessions), 5)
+	dreamTopicDirDefault := strings.TrimSpace(getenv(envDreamTopicDir))
+	maxTokensDefault, _ := parseIntOrDefault(getenv(envMaxTokensPerConsult), 16000)
+	autoTerminateDefault := parseBoolOrDefault(getenv(envAutoTerminateAudit), false)
+	memoryIndexDefault, _ := parseIntOrDefault(getenv(envMemoryIndexSize), 1024)
+	compactionTurnsDefault, _ := parseIntOrDefault(getenv(envCompactionTurns), 10)
+	compactionRatioDefault := parseFloatOrDefault(getenv(envCompactionRatio), 0.8)
+
 	fs := flag.NewFlagSet("harness", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
@@ -273,6 +324,17 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	serveBind := serveBindDefault
 	servePort := servePortDefault
 
+	// New v0.3.0 variables
+	dreamEnabled := dreamEnabledDefault
+	dreamInactivityHrs := dreamInactivityHrsDefault
+	dreamMinSessions := dreamMinSessionsDefault
+	dreamTopicDir := dreamTopicDirDefault
+	maxTokensPerConsult := maxTokensDefault
+	autoTerminateAudit := autoTerminateDefault
+	memoryIndexSize := memoryIndexDefault
+	compactionTurns := compactionTurnsDefault
+	compactionRatio := compactionRatioDefault
+
 	fs.StringVar(&modelMode, "model-mode", modelModeDefault, "model adapter mode: mock|http|ollama")
 	fs.StringVar(&modelEndpoint, "model-endpoint", modelEndpointDefault, "HTTP model endpoint URL")
 	fs.StringVar(&modelAuthHeader, "model-auth-header", modelAuthHeaderDefault, "HTTP auth header name")
@@ -287,6 +349,17 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	fs.StringVar(&branchID, "branch-id", branchIDDefault, "branch id")
 	fs.StringVar(&serveBind, "bind", serveBindDefault, "bind address (serve mode)")
 	fs.IntVar(&servePort, "port", servePortDefault, "bind port (serve mode)")
+
+	// New v0.3.0 flags (serve mode only)
+	fs.BoolVar(&dreamEnabled, "dream-enabled", dreamEnabledDefault, "enable dream daemon background job")
+	fs.IntVar(&dreamInactivityHrs, "dream-inactivity-hrs", dreamInactivityHrsDefault, "hours of inactivity before dreaming")
+	fs.IntVar(&dreamMinSessions, "dream-min-sessions", dreamMinSessionsDefault, "min sessions before dreaming")
+	fs.StringVar(&dreamTopicDir, "dream-topic-dir", dreamTopicDirDefault, "directory for topic memory files")
+	fs.IntVar(&maxTokensPerConsult, "max-tokens-per-consult", maxTokensDefault, "max tokens per consult")
+	fs.BoolVar(&autoTerminateAudit, "auto-terminate-audit", autoTerminateDefault, "auto-terminate when audit says complete")
+	fs.IntVar(&memoryIndexSize, "memory-index-size", memoryIndexDefault, "max entries in RAM index")
+	fs.IntVar(&compactionTurns, "compaction-turns", compactionTurnsDefault, "trigger compaction every N turns")
+	fs.Float64Var(&compactionRatio, "compaction-ratio", compactionRatioDefault, "trigger compaction at this budget ratio")
 
 	if err := fs.Parse(args); err != nil {
 		return parsedFlags{}, err
@@ -338,6 +411,15 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 			xsCommand:      xsCommand,
 			sessionID:      sessionID,
 			branchID:       branchID,
+			dreamEnabled:        dreamEnabled,
+			dreamInactivityHrs:  dreamInactivityHrs,
+			dreamMinSessions:    dreamMinSessions,
+			dreamTopicDir:       dreamTopicDir,
+			maxTokensPerConsult: maxTokensPerConsult,
+			autoTerminateAudit:  autoTerminateAudit,
+			memoryIndexSize:     memoryIndexSize,
+			compactionTurns:     compactionTurns,
+			compactionRatio:     compactionRatio,
 		},
 		bindAddr:      strings.TrimSpace(serveBind),
 		port:          servePort,
@@ -443,6 +525,79 @@ func parseIntOrDefault(raw string, d int) (int, error) {
 	return n, nil
 }
 
+func parseFloatOrDefault(raw string, d float64) float64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return d
+	}
+	n, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return d
+	}
+	return n
+}
+
+func parseBoolOrDefault(raw string, d bool) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return d
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return d
+	}
+	return v
+}
+
+// --- v0.3.0 component builders ---
+
+func buildMemoryManager(cfg launcherConfig) *memory.Manager {
+	indexSize := cfg.memoryIndexSize
+	if indexSize <= 0 {
+		indexSize = 1024
+	}
+	return memory.NewManager(memory.Config{
+		TopicDir:       cfg.dreamTopicDir,
+		MaxIndexEntries: indexSize,
+	})
+}
+
+func buildDreamDaemon(cfg launcherConfig, memMgr *memory.Manager, eventLog dream.EventLog) *dream.Daemon {
+	if !cfg.dreamEnabled {
+		return nil
+	}
+	return dream.NewDaemon(dream.Config{
+		Enabled:         cfg.dreamEnabled,
+		InactivityHours: cfg.dreamInactivityHrs,
+		MinSessions:     cfg.dreamMinSessions,
+		TopicDir:        cfg.dreamTopicDir,
+	}, memMgr, eventLog)
+}
+
+// backendEventLog adapts backend.Backend to dream.EventLog
+type backendEventLog struct {
+	b backend.Backend
+}
+
+func (w backendEventLog) ListBySession(ctx context.Context, sessionID string) ([]eventlog.Event, error) {
+	return w.b.ListEventsBySession(ctx, sessionID)
+}
+
+func (w backendEventLog) AppendEvent(ctx context.Context, e eventlog.Event) error {
+	return w.b.AppendEvent(ctx, e)
+}
+
+func buildAuditConfig(cfg launcherConfig) audit.Config {
+	maxTokens := cfg.maxTokensPerConsult
+	if maxTokens <= 0 {
+		maxTokens = 16000
+	}
+	return audit.Config{
+		MaxTokensPerConsult:        maxTokens,
+		AutoTerminateOnAuditComplete: cfg.autoTerminateAudit,
+	}
+}
+
 func shouldShowHelp(args []string) bool {
 	for _, arg := range args {
 		switch strings.TrimSpace(arg) {
@@ -464,7 +619,7 @@ func shouldShowVersion(args []string) bool {
 }
 
 func mainUsage() string {
-	return `pancakes-harness 0.2.4
+	return `pancakes-harness 0.3.1
 
 Local-first context and egress kernel.
 It reconstructs local consult context, shapes a bounded model-facing artifact, preserves replayable branch state, and exposes a thin ingress API.
@@ -515,7 +670,7 @@ Examples:
 }
 
 func serveUsage() string {
-	return `pancakes-harness 0.2.4
+	return `pancakes-harness 0.3.1
 
 Usage:
   harness serve [flags]

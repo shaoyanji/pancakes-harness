@@ -165,6 +165,19 @@ func isNeverEgressKind(kind string) bool {
 	if strings.HasPrefix(k, "replay.") {
 		return true
 	}
+	// New v0.3.0 event kinds are spine-only, never egress.
+	if strings.HasPrefix(k, "recovery.") {
+		return true
+	}
+	if strings.HasPrefix(k, "context.compact") {
+		return true
+	}
+	if strings.HasPrefix(k, "dream.") {
+		return true
+	}
+	if strings.HasPrefix(k, "audit.") {
+		return true
+	}
 	return false
 }
 

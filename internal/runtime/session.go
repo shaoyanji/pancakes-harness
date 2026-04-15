@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"pancakes-harness/internal/assembler"
+	"pancakes-harness/internal/audit"
 	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/egress"
 	"pancakes-harness/internal/eventlog"
+	"pancakes-harness/internal/memory"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/replay"
@@ -35,6 +37,10 @@ type Config struct {
 	ModelHeaders      []assembler.Header
 	MaxReasoningTurns int
 	Metrics           *metrics.Registry
+
+	// New v0.3.0 fields
+	MemoryManager *memory.Manager
+	AuditConfig   audit.Config
 }
 
 type Session struct {
@@ -46,6 +52,10 @@ type Session struct {
 	modelHeaders      []assembler.Header
 	maxReasoningTurns int
 	metrics           *metrics.Registry
+
+	// New v0.3.0 fields
+	memoryManager *memory.Manager
+	auditConfig   audit.Config
 
 	mu      sync.Mutex
 	counter int
@@ -88,6 +98,8 @@ func StartSession(cfg Config) (*Session, error) {
 		modelHeaders:      append([]assembler.Header(nil), cfg.ModelHeaders...),
 		maxReasoningTurns: maxTurns,
 		metrics:           cfg.Metrics,
+		memoryManager:     cfg.MemoryManager,
+		auditConfig:       cfg.AuditConfig,
 	}
 
 	events, err := s.backendListEventsBySession(context.Background(), s.id)
@@ -126,6 +138,18 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 	}
 	if err := s.backendAppendEvent(ctx, userEvent); err != nil {
 		return TurnResult{}, err
+	}
+
+	// Index the event in the memory layer (layer 1)
+	if s.memoryManager != nil {
+		s.memoryManager.IndexEvent(userEvent)
+	}
+
+	// Initialize audit tracker for this turn
+	consultID := s.nextEventID("consult")
+	var auditTracker *audit.Tracker
+	if s.metrics != nil {
+		auditTracker = audit.NewTracker(s.auditConfig, consultID, s.id, branchID)
 	}
 
 	var lastPacketBytes int
@@ -173,11 +197,49 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 		callResult, callErr := model.ExecuteAndPersist(ctx, s.backend, s.modelAdapter, callReq, modelEventID, time.Now().UTC())
 		s.observeLatency("model_call_ms", time.Since(modelStarted))
 		if callErr != nil {
+			// Record audit event with error context
+			if auditTracker != nil {
+				auditTracker.RecordTurn(ctx, 0, 0, s.appendAuditEvent)
+			}
 			return TurnResult{
 				SessionID:           s.id,
 				BranchID:            branchID,
 				PacketEnvelopeBytes: lastPacketBytes,
 			}, callErr
+		}
+
+		// Record audit event with token usage (estimated from envelope bytes)
+		if auditTracker != nil {
+			estimatedTokens := packet.Measurement.EnvelopeBytes / 4 // rough estimate
+			auditResult := auditTracker.RecordTurn(ctx, estimatedTokens, 0, s.appendAuditEvent)
+			// Check for early termination
+			if auditTracker.ShouldTerminate() && auditResult.Decision == audit.DecisionComplete {
+				// Return what we have if audit says complete
+				if callResult.Response.Decision == "answer" {
+					agent := eventlog.Event{
+						ID:        s.nextEventID("turn.agent"),
+						SessionID: s.id,
+						TS:        time.Now().UTC(),
+						Kind:      eventlog.KindTurnAgent,
+						BranchID:  branchID,
+						Meta: map[string]any{
+							"text": callResult.Response.Answer,
+						},
+					}
+					if err := s.backendAppendEvent(ctx, agent); err != nil {
+						return TurnResult{}, err
+					}
+					return TurnResult{
+						SessionID:            s.id,
+						BranchID:             branchID,
+						Answer:               callResult.Response.Answer,
+						Decision:             callResult.Response.Decision,
+						PacketEnvelopeBytes:  lastPacketBytes,
+						Selected:             append([]egress.Selected(nil), lastSelected...),
+						SelectionExplanation: cloneExplanation(lastExplanation),
+					}, nil
+				}
+			}
 		}
 
 		switch callResult.Response.Decision {
@@ -194,6 +256,10 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 			}
 			if err := s.backendAppendEvent(ctx, agent); err != nil {
 				return TurnResult{}, err
+			}
+			// Index the agent event
+			if s.memoryManager != nil {
+				s.memoryManager.IndexEvent(agent)
 			}
 			return TurnResult{
 				SessionID:            s.id,
@@ -509,6 +575,13 @@ func (s *Session) observeLatency(name string, d time.Duration) {
 	if s.metrics != nil {
 		s.metrics.ObserveLatency(name, d)
 	}
+}
+
+func (s *Session) appendAuditEvent(ev eventlog.Event) error {
+	if s.metrics == nil {
+		return nil
+	}
+	return s.backendAppendEvent(context.Background(), ev)
 }
 
 func (s *Session) observeBackend(name string, d time.Duration) {

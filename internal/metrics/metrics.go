@@ -17,6 +17,16 @@ type Registry struct {
 	selectorExclusionReasonCounts map[string]int64
 	selectorBudgetPressureTotal   int64
 
+	// New v0.3.0 counters
+	recoveryAttemptsTotal   int64
+	recoverySuccessTotal    int64
+	dreamExecutionsTotal    int64
+	compactionsTotal        int64
+	compactionRatioTotal    float64
+	compactionRatioCount    int64
+	cacheHitRateTotal       float64
+	cacheHitRateCount       int64
+
 	latencies  map[string]*timingStat
 	backendOps map[string]*timingStat
 
@@ -55,6 +65,15 @@ type Snapshot struct {
 	BodyBytes                     bytesStat             `json:"body_bytes"`
 	BackendMode                   string                `json:"backend_mode"`
 	ModelMode                     string                `json:"model_mode"`
+
+	// New v0.3.0 metrics
+	RecoveryRate      float64 `json:"recovery_rate"`
+	DreamFrequency    float64 `json:"dream_frequency"`
+	CompactionRatio   float64 `json:"compaction_ratio"`
+	CacheHitRate      float64 `json:"cache_hit_rate"`
+	RecoveryAttempts  int64   `json:"recovery_attempts"`
+	DreamExecutions   int64   `json:"dream_executions"`
+	Compactions       int64   `json:"compactions"`
 }
 
 func NewRegistry() *Registry {
@@ -141,6 +160,64 @@ func (r *Registry) IncSelectorBudgetPressure() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.selectorBudgetPressureTotal++
+}
+
+// --- New v0.3.0 metric observers ---
+
+func (r *Registry) IncRecoveryAttempt() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recoveryAttemptsTotal++
+}
+
+func (r *Registry) IncRecoverySuccess() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recoverySuccessTotal++
+}
+
+func (r *Registry) IncDreamExecution() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dreamExecutionsTotal++
+}
+
+func (r *Registry) IncCompaction() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.compactionsTotal++
+}
+
+func (r *Registry) ObserveCompactionRatio(ratio float64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.compactionRatioTotal += ratio
+	r.compactionRatioCount++
+}
+
+func (r *Registry) ObserveCacheHitRate(rate float64) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cacheHitRateTotal += rate
+	r.cacheHitRateCount++
 }
 
 func (r *Registry) ObserveLatency(name string, d time.Duration) {
@@ -261,7 +338,42 @@ func (r *Registry) Snapshot() Snapshot {
 		BodyBytes:                     r.bodyBytes,
 		BackendMode:                   r.backendMode,
 		ModelMode:                     r.modelMode,
+
+		// New v0.3.0 metrics
+		RecoveryRate:     r.computeRecoveryRateLocked(),
+		DreamFrequency:   r.computeDreamFrequencyLocked(),
+		CompactionRatio:  r.computeCompactionRatioLocked(),
+		CacheHitRate:     r.computeCacheHitRateLocked(),
+		RecoveryAttempts: r.recoveryAttemptsTotal,
+		DreamExecutions:  r.dreamExecutionsTotal,
+		Compactions:      r.compactionsTotal,
 	}
+}
+
+func (r *Registry) computeRecoveryRateLocked() float64 {
+	if r.recoveryAttemptsTotal == 0 {
+		return 0
+	}
+	return float64(r.recoverySuccessTotal) / float64(r.recoveryAttemptsTotal)
+}
+
+func (r *Registry) computeDreamFrequencyLocked() float64 {
+	// Simplified: returns total dream executions (frequency would need time tracking)
+	return float64(r.dreamExecutionsTotal)
+}
+
+func (r *Registry) computeCompactionRatioLocked() float64 {
+	if r.compactionRatioCount == 0 {
+		return 0
+	}
+	return r.compactionRatioTotal / float64(r.compactionRatioCount)
+}
+
+func (r *Registry) computeCacheHitRateLocked() float64 {
+	if r.cacheHitRateCount == 0 {
+		return 0
+	}
+	return r.cacheHitRateTotal / float64(r.cacheHitRateCount)
 }
 
 func itoa(n int) string {

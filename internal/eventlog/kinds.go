@@ -16,4 +16,11 @@ const (
 	KindResponseInvalid   = "response.invalid_schema"
 	KindConsultResolved   = "consult.resolved"
 	KindConsultUnresolved = "consult.unresolved"
+
+	// New event kinds for v0.3.0 harness upgrades.
+	KindRecoveryAttempt = "recovery.attempt"   // self-healing loop recovery attempt
+	KindRecoveryFallback = "recovery.fallback" // self-healing loop model fallback
+	KindContextCompact  = "context.compact"    // context compaction event
+	KindDreamResult     = "dream.result"        // dream daemon reflective pass result
+	KindAuditDecision   = "audit.decision"      // self-audit termination decision
 )
