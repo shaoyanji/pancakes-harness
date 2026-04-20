@@ -23,4 +23,7 @@ const (
 	KindContextCompact  = "context.compact"    // context compaction event
 	KindDreamResult     = "dream.result"        // dream daemon reflective pass result
 	KindAuditDecision   = "audit.decision"      // self-audit termination decision
+	KindPreprocessExtract = "preprocess.extraction" // fast model enrichment result
+	KindPreprocessRoute   = "preprocess.routing"    // strong model routing decision
+	KindPreprocessEnvelope = "preprocess.envelope"  // combined two-tier preprocessing record
 )
