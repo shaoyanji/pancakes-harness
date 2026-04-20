@@ -71,6 +71,9 @@ type Manager struct {
 	index  []*IndexEntry
 	topics map[string]*TopicMemory
 
+	// Content search index (inverted index + BM25)
+	searchIndex *Index
+
 	// cache hit tracking
 	cacheHits   int64
 	cacheMisses int64
@@ -79,8 +82,9 @@ type Manager struct {
 // NewManager creates a new three-layer memory manager.
 func NewManager(cfg Config) *Manager {
 	m := &Manager{
-		cfg:    cfg,
-		topics: make(map[string]*TopicMemory),
+		cfg:         cfg,
+		topics:      make(map[string]*TopicMemory),
+		searchIndex: NewIndex(),
 	}
 	if cfg.TopicDir != "" {
 		m.loadTopicsFromDisk(cfg.TopicDir)
@@ -90,7 +94,7 @@ func NewManager(cfg Config) *Manager {
 
 // --- Layer 1: Lightweight Index (RAM) ---
 
-// IndexEvent adds an event to the lightweight RAM index.
+// IndexEvent adds an event to the lightweight RAM index and the content search index.
 func (m *Manager) IndexEvent(ev eventlog.Event) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -124,6 +128,9 @@ func (m *Manager) IndexEvent(ev eventlog.Event) {
 	if len(m.index) > maxEntries {
 		m.index = m.index[len(m.index)-maxEntries:]
 	}
+
+	// Content search index (outside the RAM trim — search index is append-only)
+	m.searchIndex.Add(ev)
 }
 
 // LookupByFingerprint finds recent events matching a fingerprint.
@@ -443,6 +450,30 @@ func (m *Manager) Fork(topicID string, title string, sourceEvents []eventlog.Eve
 		Summary:      summary,
 		Tags:         tags,
 	})
+}
+
+// --- Content Search ---
+
+// SearchEvents searches the event spine by query text using BM25 scoring.
+// Returns event IDs and scores, optionally filtered by branch.
+func (m *Manager) SearchEvents(query string, branchID string, limit int) []Result {
+	return m.searchIndex.Search(query, SearchOpts{
+		BranchID: branchID,
+		Limit:    limit,
+	})
+}
+
+// BootstrapSearchIndex indexes a batch of existing events into the search index.
+// Call this once at session start with events loaded from the backend.
+func (m *Manager) BootstrapSearchIndex(events []eventlog.Event) {
+	for _, ev := range events {
+		m.searchIndex.Add(ev)
+	}
+}
+
+// SearchIndexSize returns the number of events in the content search index.
+func (m *Manager) SearchIndexSize() int {
+	return m.searchIndex.Size()
 }
 
 func deduplicateStrings(in []string) []string {

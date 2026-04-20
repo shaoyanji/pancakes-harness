@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,6 +125,12 @@ func StartSession(cfg Config) (*Session, error) {
 		return nil, err
 	}
 	s.counter = len(events)
+
+	// Bootstrap the content search index with existing events
+	if s.memoryManager != nil {
+		s.memoryManager.BootstrapSearchIndex(events)
+	}
+
 	return s, nil
 }
 
@@ -393,6 +400,7 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 	}
 
 	candidates := make([]egress.Candidate, 0, len(sessionEvents))
+	latestUserQuery := ""
 	for i, e := range sessionEvents {
 		isActiveBranch := e.BranchID == branchID
 		cand := egress.Candidate{
@@ -411,6 +419,9 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 		switch e.Kind {
 		case eventlog.KindTurnUser, eventlog.KindTurnAgent:
 			cand.Text = readMetaString(e.Meta, "text")
+			if e.Kind == eventlog.KindTurnUser && isActiveBranch && e.ID == latestUserID {
+				latestUserQuery = cand.Text
+			}
 		case eventlog.KindToolResult:
 			cand.Text = readMetaString(e.Meta, "summary")
 			callID := readMetaString(e.Meta, "call_id")
@@ -430,6 +441,21 @@ func (s *Session) assembleForBranch(ctx context.Context, branchID, externalConte
 			cand.IsGlobalRelevant = true
 		}
 		candidates = append(candidates, cand)
+	}
+
+	// Content search enrichment: mark search-relevant events as global relevant
+	// Skip single-word or very short queries — they produce noise
+	if s.memoryManager != nil && len(strings.Fields(latestUserQuery)) >= 2 {
+		searchResults := s.memoryManager.SearchEvents(latestUserQuery, "", 50)
+		resultSet := make(map[string]float64, len(searchResults))
+		for _, r := range searchResults {
+			resultSet[r.EventID] = r.Score
+		}
+		for i := range candidates {
+			if _, ok := resultSet[candidates[i].ID]; ok {
+				candidates[i].IsGlobalRelevant = true
+			}
+		}
 	}
 
 	selected, explanation := egress.SelectWithExplanation(candidates)
