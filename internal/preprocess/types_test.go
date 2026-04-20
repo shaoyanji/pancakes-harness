@@ -242,17 +242,62 @@ func TestExtraction_Meta_OmitsEmpty(t *testing.T) {
 
 	meta := e.Meta()
 
+	// Empty slices still project as empty arrays, not omitted
 	if _, ok := meta["entities"]; ok {
-		t.Error("expected entities to be omitted when empty")
+		t.Error("expected entities to be omitted when nil")
 	}
 	if _, ok := meta["topics"]; ok {
-		t.Error("expected topics to be omitted when empty")
+		t.Error("expected topics to be omitted when nil")
 	}
 	if _, ok := meta["summary"]; ok {
 		t.Error("expected summary to be omitted when empty")
 	}
 	if _, ok := meta["flags"]; ok {
-		t.Error("expected flags to be omitted when empty")
+		t.Error("expected flags to be omitted when nil")
+	}
+}
+
+func TestParseExtraction_EmptyNotNull(t *testing.T) {
+	raw := `{
+		"intent": "question",
+		"intent_confidence": 0.8,
+		"entities": null,
+		"topics": [],
+		"sentiment": "neutral",
+		"sentiment_confidence": 0.7,
+		"summary": "test",
+		"flags": null
+	}`
+
+	ext, err := parseExtraction([]byte(raw))
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+
+	if ext.Entities == nil {
+		t.Error("entities should be empty slice, not nil")
+	}
+	if len(ext.Entities) != 0 {
+		t.Errorf("entities count = %d, want 0", len(ext.Entities))
+	}
+	if ext.Topics == nil {
+		t.Error("topics should be empty slice, not nil")
+	}
+	if ext.Flags == nil {
+		t.Error("flags should be empty slice, not nil")
+	}
+
+	// Verify JSON marshaling produces [] not null
+	data, err := json.Marshal(ext)
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+	jsonStr := string(data)
+	if containsStr(jsonStr, `"entities":null`) {
+		t.Error("entities marshaled as null, should be []")
+	}
+	if containsStr(jsonStr, `"flags":null`) {
+		t.Error("flags marshaled as null, should be []")
 	}
 }
 

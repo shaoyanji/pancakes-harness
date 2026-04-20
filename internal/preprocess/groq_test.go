@@ -86,7 +86,7 @@ func TestGroqAdapter_Call_Success(t *testing.T) {
 			Model:       "openai/gpt-oss-20b",
 			Temperature: 0.1,
 			MaxTokens:   1024,
-			Strict:      true,
+			Strict:      boolPtr(true),
 		},
 		client: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -308,8 +308,9 @@ func TestNewGroqAdapter_Defaults(t *testing.T) {
 // Integration test — hits the real Groq API. Skipped by default.
 // Set GROQ_API_KEY and run with -run TestGroqAdapter_Live to test.
 func TestGroqAdapter_Live(t *testing.T) {
-	t.Skip("requires GROQ_API_KEY and network access")
-
+	if testing.Short() {
+		t.Skip("skipping live test in short mode")
+	}
 	adapter, err := NewGroqAdapter(GroqConfig{})
 	if err != nil {
 		t.Skipf("skipped: %v", err)
@@ -339,6 +340,8 @@ func TestGroqAdapter_Live(t *testing.T) {
 		t.Errorf("validation failed: %v", err)
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 // Verify FastAdapter interface is satisfied
 var _ FastAdapter = (*GroqAdapter)(nil)

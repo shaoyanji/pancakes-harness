@@ -36,7 +36,9 @@ type GroqConfig struct {
 	MaxTokens int
 	// Strict enables Groq structured output with constrained decoding.
 	// Default: true (guaranteed valid JSON matching schema).
-	Strict bool
+	// Set to false for best-effort mode — allows the model to set flags
+	// like "multi_intent" and "uncertain" that strict mode may suppress.
+	Strict *bool
 }
 
 // GroqAdapter implements FastAdapter using the Groq API.
@@ -63,8 +65,10 @@ func NewGroqAdapter(cfg GroqConfig) (*GroqAdapter, error) {
 		cfg.MaxTokens = 1024
 	}
 	// Default to strict mode — gpt-oss-20b supports it
-	// We check if the field was explicitly set, but for simplicity default to true
-	// The caller can set Strict: false explicitly if needed.
+	if cfg.Strict == nil {
+		defaultStrict := true
+		cfg.Strict = &defaultStrict
+	}
 
 	return &GroqAdapter{
 		cfg: cfg,
@@ -144,7 +148,7 @@ func (g *GroqAdapter) buildRequest(systemPrompt, text string) map[string]any {
 		"type": "json_schema",
 		"json_schema": map[string]any{
 			"name":   "extraction",
-			"strict": true,
+			"strict": *g.cfg.Strict,
 			"schema": extractionJSONSchema(),
 		},
 	}

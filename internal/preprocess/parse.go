@@ -45,14 +45,17 @@ func parseExtraction(raw []byte) (*Extraction, error) {
 		SchemaVersion:    SchemaVersionV1,
 		Intent:           IntentClass(parsed.Intent),
 		IntentConf:       parsed.IntentConf,
+		Entities:         []Entity{},
+		Topics:           []TopicTag{},
 		Sentiment:        Sentiment(parsed.Sentiment),
 		SentimentConf:    parsed.SentimentConf,
 		Summary:          truncate(parsed.Summary, 200),
+		Flags:            []Flag{},
 		SourceLength:     0, // caller sets this
 		Timestamp:        now,
 	}
 
-	// Normalize entities
+	// Normalize entities — null becomes empty slice
 	if len(parsed.Entities) > 0 {
 		ext.Entities = make([]Entity, 0, len(parsed.Entities))
 		for _, re := range parsed.Entities {
