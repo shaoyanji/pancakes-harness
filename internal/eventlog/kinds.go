@@ -18,12 +18,18 @@ const (
 	KindConsultUnresolved = "consult.unresolved"
 
 	// New event kinds for v0.3.0 harness upgrades.
-	KindRecoveryAttempt = "recovery.attempt"   // self-healing loop recovery attempt
-	KindRecoveryFallback = "recovery.fallback" // self-healing loop model fallback
-	KindContextCompact  = "context.compact"    // context compaction event
-	KindDreamResult     = "dream.result"        // dream daemon reflective pass result
-	KindAuditDecision   = "audit.decision"      // self-audit termination decision
+	KindRecoveryAttempt   = "recovery.attempt"    // self-healing loop recovery attempt
+	KindRecoveryFallback  = "recovery.fallback"   // self-healing loop model fallback
+	KindContextCompact    = "context.compact"     // context compaction event
+	KindDreamResult       = "dream.result"        // dream daemon reflective pass result
+	KindAuditDecision     = "audit.decision"      // self-audit termination decision
 	KindPreprocessExtract = "preprocess.extraction" // fast model enrichment result
 	KindPreprocessRoute   = "preprocess.routing"    // strong model routing decision
 	KindPreprocessEnvelope = "preprocess.envelope"  // combined two-tier preprocessing record
+
+	// Gemini compaction event kinds (v0.3.1+)
+	KindCompactionRequest  = "compaction.request"   // compaction pass started
+	KindCompactionComplete = "compaction.complete"  // compaction pass finished
+	KindCompactionFailure  = "compaction.failure"   // compaction pass failed
+	KindASTPersisted       = "ast.persisted"        // token AST written to blob store
 )

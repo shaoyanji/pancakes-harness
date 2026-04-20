@@ -52,3 +52,35 @@ func cloneEvent(in Event) Event {
 	}
 	return out
 }
+
+// SerializedEvent is a lightweight, JSON-friendly representation of an Event
+// for external consumption (Gemini compaction, export, etc).
+type SerializedEvent struct {
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	BranchID  string `json:"branch_id"`
+	TS        string `json:"ts"`     // RFC3339
+	Text      string `json:"text,omitempty"`
+	Summary   string `json:"summary,omitempty"`
+	BlobRef   string `json:"blob_ref,omitempty"`
+}
+
+// SerializeForCompaction converts an Event to its compact serialized form.
+func SerializeForCompaction(e Event) SerializedEvent {
+	se := SerializedEvent{
+		ID:       e.ID,
+		Kind:     e.Kind,
+		BranchID: e.BranchID,
+		TS:       e.TS.UTC().Format("2006-01-02T15:04:05Z"),
+		BlobRef:  e.BlobRef,
+	}
+	if e.Meta != nil {
+		if t, ok := e.Meta["text"].(string); ok {
+			se.Text = t
+		}
+		if s, ok := e.Meta["summary"].(string); ok {
+			se.Summary = s
+		}
+	}
+	return se
+}

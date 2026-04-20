@@ -56,12 +56,19 @@ type Config struct {
 // EmbedFunc computes a relevance score for an event given a query context.
 type EmbedFunc func(eventID, kind, textPreview, queryContext string) float64
 
+// Compactor is the interface for context compaction backends.
+// Defined here to avoid circular imports with the compactor package.
+// Implementations: compactor.GeminiCompactor, compactor.MockCompactor.
+type Compactor interface {
+	Name() string
+}
+
 // Manager coordinates the three memory layers.
 type Manager struct {
 	cfg Config
 
-	mu    sync.RWMutex
-	index []*IndexEntry
+	mu     sync.RWMutex
+	index  []*IndexEntry
 	topics map[string]*TopicMemory
 
 	// cache hit tracking

@@ -514,3 +514,69 @@ Serve layer is done when:
 - replay and branch operations remain available through the service surface
 - ingress stays decoupled from egress packet format
 - the 14KB limit is enforced only at model egress, not at local ingress
+
+## Gemini compaction layer (v0.3.1+)
+
+### Overview
+
+Gemini 2.5 Flash (1M token context) is used as a dedicated compaction backend.
+Its role is narrow: take the full event spine for a branch, produce a structured
+MemoryLeaflet AST via responseSchema, and write the AST as a checkpoint blob.
+
+Two-tier inference model:
+- **Groq** (fast): entity extraction, intent, topics, routing — the existing enrichment layer
+- **Gemini** (large context): conversation compaction into token ASTs — the new compaction layer
+
+Gemini's 1M context window eliminates chunking. Its structured output (responseSchema)
+enforces the MemoryLeaflet schema at inference level, avoiding prompt-level format drift.
+
+### Milestone 9 — Gemini compaction (DONE)
+
+Build:
+
+- `internal/compactor/schema.go` — MemoryLeaf, TokenAST, response schema generation
+- `internal/compactor/gemini.go` — Gemini API adapter with responseSchema
+- `internal/compactor/compactor.go` — Compactor interface + GeminiCompactor orchestrator + MockCompactor
+- New event kinds: `compaction.request`, `compaction.complete`, `compaction.failure`, `ast.persisted`
+- `SerializedEvent` type in eventlog for external consumption
+- Tests: AST validation, Gemini response parsing, mock compaction pipeline
+
+Acceptance:
+
+- Gemini adapter sends responseSchema and parses structured output
+- AST validates against the Fibonacci tier depth constraints (root=3, section=2, cluster=1, event=0)
+- Mock compactor works for testing without Gemini API access
+- Full test suite passes
+
+### Milestone 10 — compaction scheduling (PLANNED)
+
+Build:
+
+- Trigger logic: fire compaction every N turns or when budget pressure ratio exceeds threshold
+- Integration with runtime/session's turn loop
+- `context.compact` event written to spine after each compaction pass
+- AST blob persistence via backend.AppendBlob
+- SummaryCheckpoint wiring: compaction checkpoint replaces old score-based compaction
+
+Acceptance:
+
+- Compaction fires automatically when triggered
+- Spine records the compaction pass (request + complete events)
+- AST is retrievable via blob ref from the checkpoint
+- Packet assembler can reference AST nodes as working items
+
+### Memory leaflet AST structure
+
+```
+Fibonacci heap-inspired tiers:
+  depth 3 (root):    1 node — conversation root summary
+  depth 2 (section): 2–3 nodes — major conversation sections
+  depth 1 (cluster): 5–8 nodes — thematic event groups
+  depth 0 (event):   13+ nodes — individual event summaries
+```
+
+Each leaf has: id, kind, depth, parent_id, child_ids, summary, event_refs,
+importance (0.0–1.0), tags, timestamp.
+
+The AST is a DAG validated for: no circular refs, depth/kind consistency,
+parent-child depth consistency, and non-empty content at every node.
