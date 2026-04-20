@@ -1,6 +1,6 @@
-# pancakes-harness v0.3.1 — AI Harness Guide
+# pancakes-harness v0.4.0 — AI Harness Guide
 
-This document describes the v0.3.1 harness with self-healing, context compaction, three-layer memory, dreaming, and self-auditing.
+This document describes the v0.4.0 harness with self-healing, context compaction, three-layer memory, dreaming, self-auditing, and two-tier preprocessing.
 
 ## Architecture Overview
 
@@ -222,7 +222,110 @@ These kinds are excluded from egress (never sent to the model) per the `isNeverE
 
 ---
 
-## 9. Configuration
+## 9. Two-Tier Preprocessing Pipeline
+
+The harness supports a fast pre-processing sidecar that enriches ingress messages before the main model loop runs. The architecture separates extraction (fast model) from routing (strong model) to minimize latency while preserving decision quality.
+
+### Design
+
+┌──────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Ingress  │────▶│  Fast Model     │────▶│  Event Spine    │
+│  (text)   │     │  (extraction)   │     │  (durable)      │
+└──────────┘     └────────┬────────┘     └─────────────────┘
+                          │
+                   ShouldRouteToStrong()?
+                          │
+                 ┌────────┴────────┐
+                 │                 │
+            ┌────▼────┐     ┌─────▼──────┐
+            │  Skip   │     │ Strong     │
+            │ (direct)│     │ Model      │
+            └─────────┘     │ (routing)  │
+                            └────────────┘
+
+### Golden Schema (`internal/preprocess/types.go`)
+
+The fast model produces an `Extraction` — pure enrichment, no decisions:
+
+| Field              | Type       | Constraint                         |
+|--------------------|------------|------------------------------------|
+| `intent`           | enum       | question, command, status_update, artifact_share, conversation, correction, unknown |
+| `intent_confidence`| float      | 0.0–1.0                           |
+| `entities`         | []Entity   | name (non-empty), type enum, confidence, match_type |
+| `topics`           | []TopicTag | code, debugging, planning, infra, data, review, meta, general |
+| `sentiment`        | enum       | neutral, positive, frustrated, urgent |
+| `sentiment_confidence` | float  | 0.0–1.0                           |
+| `summary`          | string     | max 200 chars                     |
+| `flags`            | []Flag     | uncertain, multi_intent, ambiguous_entity, low_confidence, needs_review |
+
+The strong model produces a `Routing` — decisions only:
+
+| Field              | Type       | Description                       |
+|--------------------|------------|------------------------------------|
+| `intent`           | IntentClass| confirmed or revised intent        |
+| `suggested_tool`   | string     | tool to invoke                     |
+| `target_agent`     | string     | agent to route to                  |
+| `priority`         | enum       | low, medium, high                  |
+| `requires_context` | bool       | needs store/memory lookup          |
+| `reasoning`        | string     | why this routing was chosen        |
+
+Both are combined in an `Envelope` with processing metadata (model names, latency, memory query time).
+
+### Background Daemon (`internal/preprocess/daemon.go`)
+
+The fast preprocessor runs as a concurrent sidecar, not a synchronous call:
+
+- **Channel-based event loop** with configurable worker pool
+- **Fail-fast**: hard timeout per job (default 2s), errors never block the caller
+- **Stackable**: results accumulate for debugging/inspection via `Results()`
+- **Non-blocking submit**: returns false if queue is full (caller skips preprocessing)
+- **Spine integration**: records `preprocess.extraction` events on success only
+- **OnResult callback**: for memory indexing or triggering downstream routing
+
+### Strict vs Best-Effort Mode
+
+The Groq adapter supports two modes via `Strict` config:
+
+| Mode          | Behavior                                              | Use Case                       |
+|---------------|-------------------------------------------------------|--------------------------------|
+| Strict (default) | Constrained decoding, guaranteed valid JSON, no flags | Production — deterministic     |
+| Best-effort   | Model can set flags like `multi_intent`, `uncertain`  | Debugging — escape hatch routing |
+
+`ShouldRouteToStrong()` returns true when:
+- Any flag is set (uncertain, multi_intent, needs_review)
+- Intent confidence < 0.5
+
+### Groq Adapter (`internal/preprocess/groq.go`)
+
+- Endpoint: `POST https://api.groq.com/openai/v1/chat/completions`
+- Model: `openai/gpt-oss-20b` (supports strict mode)
+- Structured output via `response_format.json_schema` with `strict: true`
+- Auth: `GROQ_API_KEY` env var
+- Temperature: 0.1 (extraction consistency)
+- Latency: 300–700ms per message
+
+### Integration with Session
+
+The daemon is wired into `runtime/session.go` via `Config.Preprocessor`:
+
+```go
+// In handleUserTurn, after recording turn.user event:
+if s.preprocessor != nil {
+    s.preprocessor.Submit(preprocess.Job{
+        ID:        eventID,
+        SessionID: s.id,
+        BranchID:  branchID,
+        Text:      text,
+        TS:        now,
+    })
+}
+```
+
+The session continues to packet assembly immediately — preprocessing runs in the background and its results are available for the next turn or for memory indexing.
+
+---
+
+## 10. Configuration
 
 All new v0.3.0 options are available as environment variables and serve-mode flags. See `.env.example` for the complete list.
 
@@ -244,7 +347,7 @@ New v0.3.0 flags:
 
 ---
 
-## 10. Backward Compatibility
+## 11. Backward Compatibility
 
 - All existing benchmarks, demo-cli replay/fork commands, and tests pass unchanged
 - New features are fully covered by the event spine (replays work perfectly)
@@ -254,7 +357,7 @@ New v0.3.0 flags:
 
 ---
 
-## 11. Nix Integration
+## 12. Nix Integration
 
 The dream daemon is first-class in `flake.nix`:
 
@@ -268,3 +371,34 @@ nix run .#dream -- -force -session-id demo
 # Or use the harness with dream enabled
 nix run .#harness -- serve -dream-enabled -dream-topic-dir /tmp/topics
 ```
+
+---
+
+## 13. Future Considerations
+
+### Local Model Fallback
+
+The Groq adapter is the primary fast model backend, but the `FastAdapter` interface is backend-agnostic. A local model adapter (llama.cpp, Ollama) would provide:
+- Offline preprocessing when Groq is unavailable or rate-limited
+- Schema adherence without API latency for development/testing
+- Same golden schema contract regardless of backend
+
+The daemon's fail-fast design means a local fallback adapter can be swapped in without changing the event loop or spine integration.
+
+### Embedding Model Integration
+
+Groq inference at 1000 tok/s makes extraction fast, but embedding models offer a complementary capability:
+- **Semantic indexing**: embed entity names, topics, and summaries for vector similarity search in the memory layer
+- **Decoherence shaping**: raw embedding vectors need projection into the structured schema — the extraction schema could serve as the target shape for embedding-to-structure pipelines
+- **Hybrid scoring**: combine recency (current `ScoreEvents` heuristic) with semantic relevance from embeddings for better compaction and working set selection
+
+The memory layer's `EmbedFunc` interface already exists for pluggable relevance scoring. Embedding models would plug in there, with the extraction schema providing the structured metadata that embeddings operate on.
+
+### Schema Form Adherence
+
+The strict/best-effort split in the Groq adapter points toward a general pattern:
+- Strict mode for deterministic extraction (production)
+- Best-effort for uncertainty signaling (debugging, exploration)
+- Local model fallback for both modes when API latency or cost is a concern
+
+A `SchemaValidator` interface could enforce golden schema conformance regardless of backend — validating that any model output (Groq, local, future providers) conforms to the same contract before it reaches the event spine.
