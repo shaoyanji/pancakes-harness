@@ -144,6 +144,55 @@ func (a *GeminiAdapter) Compact(ctx context.Context, events []eventlog.Serialize
 	}, nil
 }
 
+// CompactWithCustomPrompts calls Gemini with caller-supplied prompts.
+// Used by the merge pass where the prompt content differs from the standard chunk compaction.
+func (a *GeminiAdapter) CompactWithCustomPrompts(
+	ctx context.Context,
+	systemPrompt, userPrompt,
+	sessionID, branchID string,
+) (rawJSON []byte, inputTokens, outputTokens int, latency time.Duration, err error) {
+	started := time.Now()
+
+	reqBody := a.buildRequest(systemPrompt, userPrompt)
+	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("marshal merge request: %w", err)
+	}
+
+	endpoint := fmt.Sprintf("%s/models/%s:generateContent", a.cfg.Endpoint, a.cfg.Model)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqJSON))
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("create merge request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if a.cfg.BearerToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+a.cfg.BearerToken)
+	} else if a.cfg.APIKey != "" {
+		httpReq.Header.Set("x-goog-api-key", a.cfg.APIKey)
+	}
+
+	resp, err := a.client.Do(httpReq)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("merge request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("read merge response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, 0, 0, 0, fmt.Errorf("merge API error (status %d): %s", resp.StatusCode, truncate(string(body), 500))
+	}
+
+	outputJSON, inputTokens, outputTokens, err := extractGeminiContent(body)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+
+	return outputJSON, inputTokens, outputTokens, time.Since(started), nil
+}
+
 // buildRequest constructs the Gemini generateContent request with responseSchema.
 func (a *GeminiAdapter) buildRequest(systemPrompt, userPrompt string) map[string]any {
 	contents := []map[string]any{
