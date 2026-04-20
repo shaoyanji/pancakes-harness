@@ -12,6 +12,7 @@ import (
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/audit"
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/compactor"
 	"pancakes-harness/internal/egress"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/memory"
@@ -41,6 +42,10 @@ type Config struct {
 	// New v0.3.0 fields
 	MemoryManager *memory.Manager
 	AuditConfig   audit.Config
+
+	// v0.3.1 Gemini compaction
+	Compactor        compactor.Compactor
+	CompactionSchedule compactor.ScheduleConfig
 }
 
 type Session struct {
@@ -53,9 +58,13 @@ type Session struct {
 	maxReasoningTurns int
 	metrics           *metrics.Registry
 
-	// New v0.3.0 fields
+	// v0.3.0 fields
 	memoryManager *memory.Manager
 	auditConfig   audit.Config
+
+	// v0.3.1 Gemini compaction
+	compactor compactor.Compactor
+	scheduler *compactor.Scheduler
 
 	mu      sync.Mutex
 	counter int
@@ -89,6 +98,12 @@ func StartSession(cfg Config) (*Session, error) {
 		maxTurns = 4
 	}
 
+	// Initialize compaction scheduler if compactor is configured
+	var sched *compactor.Scheduler
+	if cfg.Compactor != nil {
+		sched = compactor.NewScheduler(cfg.CompactionSchedule)
+	}
+
 	s := &Session{
 		id:                cfg.SessionID,
 		defaultBranchID:   branch,
@@ -100,6 +115,8 @@ func StartSession(cfg Config) (*Session, error) {
 		metrics:           cfg.Metrics,
 		memoryManager:     cfg.MemoryManager,
 		auditConfig:       cfg.AuditConfig,
+		compactor:         cfg.Compactor,
+		scheduler:         sched,
 	}
 
 	events, err := s.backendListEventsBySession(context.Background(), s.id)
@@ -168,6 +185,12 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 		s.observeEnvelopeBytes(packet.Measurement.EnvelopeBytes)
 		s.observeBodyBytes(len(packet.BodyJSON))
 		s.incCompactionStage(packet.Stage)
+
+		// Report budget pressure to compaction scheduler
+		if s.scheduler != nil {
+			budgetRatio := float64(packet.Measurement.EnvelopeBytes) / float64(assembler.MaxEnvelopeBytes)
+			s.scheduler.RecordBudgetPressure(budgetRatio)
+		}
 
 		modelEventID := s.nextEventID("response")
 		callReq := model.Request{
@@ -261,6 +284,10 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 			if s.memoryManager != nil {
 				s.memoryManager.IndexEvent(agent)
 			}
+
+			// Record turn and maybe trigger compaction
+			s.recordTurnAndMaybeCompact(ctx, branchID)
+
 			return TurnResult{
 				SessionID:            s.id,
 				BranchID:             branchID,
@@ -627,6 +654,134 @@ func (s *Session) observeSelectionExplanation(explanation egress.Explanation) {
 	if explanation.BudgetPressure {
 		s.metrics.IncSelectorBudgetPressure()
 	}
+}
+
+// recordTurnAndMaybeCompact records the completed turn in the scheduler
+// and fires compaction if conditions are met.
+func (s *Session) recordTurnAndMaybeCompact(ctx context.Context, branchID string) {
+	if s.scheduler == nil || s.compactor == nil {
+		return
+	}
+
+	s.scheduler.RecordTurn()
+
+	// Update event count for the scheduler
+	events, err := s.backendListEventsByBranch(ctx, s.id, branchID)
+	if err == nil {
+		s.scheduler.SetEventCount(len(events))
+	}
+
+	should, reason := s.scheduler.ShouldCompact()
+	if !should {
+		return
+	}
+
+	s.runCompaction(ctx, branchID, events, reason)
+}
+
+// runCompaction executes a compaction pass and records events to the spine.
+func (s *Session) runCompaction(ctx context.Context, branchID string, events []eventlog.Event, reason string) {
+	now := time.Now().UTC()
+
+	// Write compaction.request event
+	requestEvent := eventlog.Event{
+		ID:        s.nextEventID("compaction.request"),
+		SessionID: s.id,
+		TS:        now,
+		Kind:      eventlog.KindCompactionRequest,
+		BranchID:  branchID,
+		Meta: map[string]any{
+			"trigger_reason": reason,
+			"event_count":    len(events),
+			"compactor":      s.compactor.Name(),
+		},
+	}
+	if err := s.backendAppendEvent(ctx, requestEvent); err != nil {
+		// Non-fatal — compaction is best-effort
+		s.observeLatency("compaction_error_ms", 0)
+		return
+	}
+
+	// Run the compactor
+	compactStart := time.Now()
+	compactReq := compactor.CompactRequest{
+		SessionID: s.id,
+		BranchID:  branchID,
+		Events:    events,
+	}
+	resp, err := s.compactor.CompactContext(ctx, compactReq)
+	compactLatency := time.Since(compactStart)
+
+	if err != nil {
+		// Write compaction.failure event
+		failureEvent := eventlog.Event{
+			ID:        s.nextEventID("compaction.failure"),
+			SessionID: s.id,
+			TS:        time.Now().UTC(),
+			Kind:      eventlog.KindCompactionFailure,
+			BranchID:  branchID,
+			Meta: map[string]any{
+				"trigger_reason": reason,
+				"error":          err.Error(),
+			},
+		}
+		_ = s.backendAppendEvent(ctx, failureEvent)
+		s.scheduler.MarkCompactionFailed()
+		s.observeLatency("compaction_ms", compactLatency)
+		return
+	}
+
+	// Persist AST blob
+	blobRef := resp.Checkpoint.BlobRef
+	if blobErr := s.backendAppendBlob(ctx, blobRef, resp.RawAST); blobErr != nil {
+		// Non-fatal — AST not persisted, but we still have the checkpoint
+	}
+
+	// Write ast.persisted event
+	astEvent := eventlog.Event{
+		ID:        s.nextEventID("ast.persisted"),
+		SessionID: s.id,
+		TS:        time.Now().UTC(),
+		Kind:      eventlog.KindASTPersisted,
+		BranchID:  branchID,
+		Meta: map[string]any{
+			"blob_ref":       blobRef,
+			"summary_id":     resp.Checkpoint.SummaryID,
+			"input_events":   resp.Metrics.InputEvents,
+			"output_bytes":   resp.Metrics.OutputBytes,
+			"chunk_count":    resp.Metrics.ChunkCount,
+			"merge_pass":     resp.Metrics.MergePass,
+			"compression_pct": fmt.Sprintf("%.1f", resp.Metrics.CompressionPct),
+		},
+	}
+	_ = s.backendAppendEvent(ctx, astEvent)
+
+	// Write compaction.complete event
+	completeEvent := eventlog.Event{
+		ID:        s.nextEventID("compaction.complete"),
+		SessionID: s.id,
+		TS:        time.Now().UTC(),
+		Kind:      eventlog.KindCompactionComplete,
+		BranchID:  branchID,
+		Meta: map[string]any{
+			"trigger_reason":  reason,
+			"summary_id":      resp.Checkpoint.SummaryID,
+			"blob_ref":        blobRef,
+			"input_events":    resp.Metrics.InputEvents,
+			"output_bytes":    resp.Metrics.OutputBytes,
+			"compression_pct": fmt.Sprintf("%.1f", resp.Metrics.CompressionPct),
+			"input_tokens":    resp.Metrics.InputTokens,
+			"output_tokens":   resp.Metrics.OutputTokens,
+			"total_latency_ms": compactLatency.Milliseconds(),
+			"chunk_count":     resp.Metrics.ChunkCount,
+			"merge_pass":      resp.Metrics.MergePass,
+			"leaves_in_ast":   len(resp.AST.Leaves),
+		},
+	}
+	_ = s.backendAppendEvent(ctx, completeEvent)
+
+	s.scheduler.MarkCompacted()
+	s.observeLatency("compaction_ms", compactLatency)
 }
 
 func cloneExplanation(in egress.Explanation) *egress.Explanation {

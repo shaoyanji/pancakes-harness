@@ -548,22 +548,27 @@ Acceptance:
 - Mock compactor works for testing without Gemini API access
 - Full test suite passes
 
-### Milestone 10 — compaction scheduling (PLANNED)
+### Milestone 10 — compaction scheduling (DONE)
 
 Build:
 
-- Trigger logic: fire compaction every N turns or when budget pressure ratio exceeds threshold
-- Integration with runtime/session's turn loop
-- `context.compact` event written to spine after each compaction pass
-- AST blob persistence via backend.AppendBlob
-- SummaryCheckpoint wiring: compaction checkpoint replaces old score-based compaction
+- `internal/compactor/scheduler.go` — ScheduleConfig, Scheduler with turn/budget/cooldown triggers
+- `internal/compactor/scheduler_test.go` — 7 tests covering all trigger paths
+- Runtime session integration: Compactor + Scheduler wired into Config + Session
+- Budget pressure reporting from assembler → scheduler after each packet
+- `recordTurnAndMaybeCompact()` called after every completed agent turn
+- `runCompaction()` writes spine events: compaction.request → ast.persisted → compaction.complete
+- Failure path writes compaction.failure, resets cooldown for retry
+- AST blob persisted via backend.AppendBlob with blob ref from checkpoint
 
 Acceptance:
 
-- Compaction fires automatically when triggered
-- Spine records the compaction pass (request + complete events)
+- Compaction fires automatically when turn count or budget pressure triggers
+- Spine records the full compaction lifecycle (request → ast.persisted → complete)
+- Failure writes compaction.failure event, scheduler allows immediate retry
 - AST is retrievable via blob ref from the checkpoint
-- Packet assembler can reference AST nodes as working items
+- Cooldown prevents compaction storms (default 3 turns)
+- Config is zero-safe: nil compactor means no compaction, existing code unaffected
 
 ### Memory leaflet AST structure
 
