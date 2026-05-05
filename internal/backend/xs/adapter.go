@@ -2,12 +2,14 @@ package xs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"strings"
 	"sync"
 
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 )
 
@@ -264,4 +266,167 @@ func cloneDiagnostics(in []backend.Diagnostic) []backend.Diagnostic {
 		out = append(out, cp)
 	}
 	return out
+}
+
+// Housekeeping
+
+func (a *Adapter) Ping(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func (a *Adapter) Close() error {
+	return nil
+}
+
+// Consult manifest operations
+
+func (a *Adapter) SaveManifest(ctx context.Context, m consult.ManifestV1) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Store manifest in blobs for persistence
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	a.blobs["manifest:"+m.EventID] = data
+	return nil
+}
+
+func (a *Adapter) LoadManifest(ctx context.Context, eventID string) (consult.ManifestV1, error) {
+	select {
+	case <-ctx.Done():
+		return consult.ManifestV1{}, ctx.Err()
+	default:
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	data, ok := a.blobs["manifest:"+eventID]
+	if !ok {
+		return consult.ManifestV1{}, backend.ErrNotFound
+	}
+	var m consult.ManifestV1
+	if err := json.Unmarshal(data, &m); err != nil {
+		return consult.ManifestV1{}, err
+	}
+	return m, nil
+}
+
+func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var manifests []consult.ManifestV1
+	for key, data := range a.blobs {
+		if strings.HasPrefix(key, "manifest:") {
+			var m consult.ManifestV1
+			if err := json.Unmarshal(data, &m); err == nil {
+				manifests = append(manifests, m)
+			}
+		}
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = len(manifests)
+	}
+
+	start := offset
+	if start > len(manifests) {
+		return []consult.ManifestV1{}, nil
+	}
+
+	end := start + limit
+	if end > len(manifests) {
+		end = len(manifests)
+	}
+
+	return manifests[start:end], nil
+}
+
+func (a *Adapter) StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error) {
+	ch := make(chan consult.ManifestV1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(ch)
+		defer close(errCh)
+
+		a.mu.RLock()
+		var manifests []consult.ManifestV1
+		for key, data := range a.blobs {
+			if strings.HasPrefix(key, "manifest:") {
+				var m consult.ManifestV1
+				if err := json.Unmarshal(data, &m); err == nil {
+					manifests = append(manifests, m)
+				}
+			}
+		}
+		a.mu.RUnlock()
+
+		for _, m := range manifests {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			case ch <- m:
+			}
+		}
+		errCh <- nil
+	}()
+
+	return ch, errCh
+}
+
+// Consult event operations
+
+func (a *Adapter) SaveEvent(ctx context.Context, e consult.EventV1) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	data, err := json.Marshal(e)
+	if err != nil {
+		return err
+	}
+	a.blobs["event:"+e.EventID] = data
+	return nil
+}
+
+func (a *Adapter) LoadEvent(ctx context.Context, eventID string) (consult.EventV1, error) {
+	select {
+	case <-ctx.Done():
+		return consult.EventV1{}, ctx.Err()
+	default:
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	data, ok := a.blobs["event:"+eventID]
+	if !ok {
+		return consult.EventV1{}, backend.ErrNotFound
+	}
+	var e consult.EventV1
+	if err := json.Unmarshal(data, &e); err != nil {
+		return consult.EventV1{}, err
+	}
+	return e, nil
 }

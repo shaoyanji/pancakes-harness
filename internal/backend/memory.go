@@ -4,22 +4,27 @@ import (
 	"context"
 	"sync"
 
+	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 )
 
 type MemoryBackend struct {
-	mu       sync.RWMutex
-	sessions map[string][]eventlog.Event
-	byID     map[string]map[string]eventlog.Event
-	blobs    map[string][]byte
-	diag     []Diagnostic
+	mu        sync.RWMutex
+	sessions  map[string][]eventlog.Event
+	byID      map[string]map[string]eventlog.Event
+	blobs     map[string][]byte
+	diag      []Diagnostic
+	manifests map[string]consult.ManifestV1
+	events    map[string]consult.EventV1
 }
 
 func NewMemoryBackend() *MemoryBackend {
 	return &MemoryBackend{
-		sessions: make(map[string][]eventlog.Event),
-		byID:     make(map[string]map[string]eventlog.Event),
-		blobs:    make(map[string][]byte),
+		sessions:  make(map[string][]eventlog.Event),
+		byID:      make(map[string]map[string]eventlog.Event),
+		blobs:     make(map[string][]byte),
+		manifests: make(map[string]consult.ManifestV1),
+		events:    make(map[string]consult.EventV1),
 	}
 }
 
@@ -195,4 +200,153 @@ func cloneDiagnostics(in []Diagnostic) []Diagnostic {
 		out = append(out, cp)
 	}
 	return out
+}
+
+// Consult manifest operations
+
+func (b *MemoryBackend) SaveManifest(ctx context.Context, m consult.ManifestV1) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.manifests[m.EventID] = m
+	return nil
+}
+
+func (b *MemoryBackend) LoadManifest(ctx context.Context, eventID string) (consult.ManifestV1, error) {
+	select {
+	case <-ctx.Done():
+		return consult.ManifestV1{}, ctx.Err()
+	default:
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	m, ok := b.manifests[eventID]
+	if !ok {
+		return consult.ManifestV1{}, ErrNotFound
+	}
+	return m, nil
+}
+
+func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	// Collect manifests in a deterministic order (sorted by EventID)
+	result := make([]consult.ManifestV1, 0, len(b.manifests))
+	ids := make([]string, 0, len(b.manifests))
+	for id := range b.manifests {
+		ids = append(ids, id)
+	}
+	// Sort for deterministic ordering
+	for i := 0; i < len(ids); i++ {
+		for j := i + 1; j < len(ids); j++ {
+			if ids[i] > ids[j] {
+				ids[i], ids[j] = ids[j], ids[i]
+			}
+		}
+	}
+	for _, id := range ids {
+		result = append(result, b.manifests[id])
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = len(result)
+	}
+
+	start := offset
+	if start > len(result) {
+		return []consult.ManifestV1{}, nil
+	}
+
+	end := start + limit
+	if end > len(result) {
+		end = len(result)
+	}
+
+	return result[start:end], nil
+}
+
+func (b *MemoryBackend) StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error) {
+	ch := make(chan consult.ManifestV1)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(ch)
+		defer close(errCh)
+
+		b.mu.RLock()
+		manifests := make([]consult.ManifestV1, 0, len(b.manifests))
+		for _, m := range b.manifests {
+			manifests = append(manifests, m)
+		}
+		b.mu.RUnlock()
+
+		for _, m := range manifests {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			case ch <- m:
+			}
+		}
+		errCh <- nil
+	}()
+
+	return ch, errCh
+}
+
+// Consult event operations
+
+func (b *MemoryBackend) SaveEvent(ctx context.Context, e consult.EventV1) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events[e.EventID] = e
+	return nil
+}
+
+func (b *MemoryBackend) LoadEvent(ctx context.Context, eventID string) (consult.EventV1, error) {
+	select {
+	case <-ctx.Done():
+		return consult.EventV1{}, ctx.Err()
+	default:
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	e, ok := b.events[eventID]
+	if !ok {
+		return consult.EventV1{}, ErrNotFound
+	}
+	return e, nil
+}
+
+// Housekeeping
+
+func (b *MemoryBackend) Ping(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func (b *MemoryBackend) Close() error {
+	return nil
 }

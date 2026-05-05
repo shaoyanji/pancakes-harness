@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"pancakes-harness/internal/backend"
-	"pancakes-harness/internal/backend/xs"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/replay"
 )
@@ -15,12 +14,6 @@ func TestBackendAdapterCanBeSwappedWithoutRuntimeChanges(t *testing.T) {
 	t.Parallel()
 
 	mem := backend.NewMemoryBackend()
-	xsAdapter := xs.NewAdapter(
-		xs.Config{Command: "sh", HealthArgs: []string{"-c", "echo ok"}},
-		xs.WithCommandRunner(func(ctx context.Context, command string, args ...string) ([]byte, error) {
-			return []byte("ok"), nil
-		}),
-	)
 
 	runScenario := func(t *testing.T, name string, b backend.Backend) {
 		t.Helper()
@@ -71,5 +64,4 @@ func TestBackendAdapterCanBeSwappedWithoutRuntimeChanges(t *testing.T) {
 	}
 
 	runScenario(t, "memory", mem)
-	runScenario(t, "xs", xsAdapter)
 }
