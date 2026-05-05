@@ -1,0 +1,4 @@
+builds:
+  - eval: ./flake.nix
+  - packages.x86_64-linux.default
+  - devShells.x86_64-linux.default

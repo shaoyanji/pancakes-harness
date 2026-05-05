@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"pancakes-harness/internal/backend"
 )
 
 func TestHealthCheckDiagnosticsAreClearOnFailure(t *testing.T) {
@@ -56,5 +58,12 @@ func TestHealthCheckDiagnosticsAreClearOnFailure(t *testing.T) {
 		if len(a.LastDiagnostics()) != 0 {
 			t.Fatalf("expected cleared diagnostics, got %#v", a.LastDiagnostics())
 		}
+	})
+}
+
+// TestXSBackendCompliance runs the full backend compliance suite against the XS adapter.
+func TestXSBackendCompliance(t *testing.T) {
+	backend.BackendComplianceTest(t, func(tb testing.TB) backend.Backend {
+		return NewAdapter(Config{})
 	})
 }

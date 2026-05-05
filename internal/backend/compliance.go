@@ -1,4 +1,4 @@
-package backend_test
+package backend
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"pancakes-harness/internal/backend"
 	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/replay"
@@ -14,7 +13,7 @@ import (
 
 // BackendComplianceTest is a reusable test suite for backend implementations.
 // Every adapter must pass this suite to be considered compliant.
-func BackendComplianceTest(t *testing.T, factory func(testing.TB) backend.Backend) {
+func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 	t.Helper()
 
 	t.Run("SaveLoadManifestRoundTrip", func(t *testing.T) {
@@ -98,7 +97,7 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) backend.Backen
 		if err == nil {
 			t.Fatal("expected error for nonexistent manifest, got nil")
 		}
-		if err != backend.ErrNotFound {
+		if err != ErrNotFound {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
 	})
@@ -111,7 +110,7 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) backend.Backen
 		if err == nil {
 			t.Fatal("expected error for nonexistent event, got nil")
 		}
-		if err != backend.ErrNotFound {
+		if err != ErrNotFound {
 			t.Errorf("expected ErrNotFound, got %v", err)
 		}
 	})
@@ -261,9 +260,9 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) backend.Backen
 func TestBackendAdapterCanBeSwappedWithoutRuntimeChanges(t *testing.T) {
 	t.Parallel()
 
-	mem := backend.NewMemoryBackend()
+	mem := NewMemoryBackend()
 
-	runScenario := func(t *testing.T, name string, b backend.Backend) {
+	runScenario := func(t *testing.T, name string, b Backend) {
 		t.Helper()
 		ctx := context.Background()
 		ts := time.Date(2026, 3, 23, 12, 0, 0, 0, time.UTC)

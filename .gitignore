@@ -1,16 +1,6 @@
 ```
-# Go-specific ignores
-*.o
-*.out
-*.test
-*.prof
-coverage.out
-
-# Dependencies and build artifacts
-vendor/
-bin/
-*.mod
-*.sum
+# Dependencies
+.garnix/
 
 # Logs and temp files
 *.log
@@ -24,10 +14,4 @@ bin/
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
-
-# OS generated files
-.DS_Store
-Thumbs.db
 ```
