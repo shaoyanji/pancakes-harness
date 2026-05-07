@@ -17,7 +17,7 @@ func TestReviewSvc_ListRecent(t *testing.T) {
 	svc := NewReviewSvc(store)
 
 	// Add test events
-	events := []consult.EventV1{
+	events := []consult.EventSummary{
 		CreateTestEvent("evt-1", "gpt-4", "completed"),
 		CreateTestEvent("evt-2", "claude-3", "completed"),
 		CreateTestEvent("evt-3", "gpt-4", "recovery"),
@@ -44,7 +44,7 @@ func TestReviewSvc_Show(t *testing.T) {
 	svc := NewReviewSvc(store)
 
 	event := CreateTestEvent("evt-show", "gpt-4", "completed")
-	if err := store.AddTestEvents([]consult.EventV1{event}); err != nil {
+	if err := store.AddTestEvents([]consult.EventSummary{event}); err != nil {
 		t.Fatalf("AddTestEvents failed: %v", err)
 	}
 
@@ -54,11 +54,11 @@ func TestReviewSvc_Show(t *testing.T) {
 		t.Fatalf("Show failed: %v", err)
 	}
 
-	if result.EventID != "evt-show" {
-		t.Errorf("expected event ID evt-show, got %q", result.EventID)
+	if result.Fingerprint != "evt-show" {
+		t.Errorf("expected fingerprint evt-show, got %q", result.Fingerprint)
 	}
-	if result.Manifest.Model != "gpt-4" {
-		t.Errorf("expected model gpt-4, got %q", result.Manifest.Model)
+	if result.Outcome != "completed" {
+		t.Errorf("expected outcome completed, got %q", result.Outcome)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestReviewSvc_Export(t *testing.T) {
 	store := NewMemoryStore()
 	svc := NewReviewSvc(store)
 
-	events := []consult.EventV1{
+		events := []consult.EventSummary{
 		CreateTestEvent("evt-export-1", "gpt-4", "completed"),
 		CreateTestEvent("evt-export-2", "claude-3", "recovery"),
 	}
@@ -106,7 +106,7 @@ func TestReviewSvc_Export(t *testing.T) {
 
 	// Verify each line is valid JSON
 	for i, line := range lines {
-		var e consult.EventV1
+		var e consult.EventSummary
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Errorf("line %d is not valid JSON: %v", i, err)
 		}
@@ -141,7 +141,7 @@ func TestReviewSvc_ListRecentPagination(t *testing.T) {
 	// Add 10 events
 	for i := 0; i < 10; i++ {
 		event := CreateTestEvent("evt-page-"+string(rune('0'+i)), "gpt-4", "completed")
-		if err := store.AddTestEvents([]consult.EventV1{event}); err != nil {
+		if err := store.AddTestEvents([]consult.EventSummary{event}); err != nil {
 			t.Fatalf("AddTestEvents failed: %v", err)
 		}
 	}
@@ -175,7 +175,7 @@ func TestMemoryStore_Count(t *testing.T) {
 		t.Errorf("expected count 0, got %d", store.Count())
 	}
 
-	events := []consult.EventV1{
+		events := []consult.EventSummary{
 		CreateTestEvent("evt-1", "gpt-4", "completed"),
 		CreateTestEvent("evt-2", "claude-3", "completed"),
 	}
@@ -192,7 +192,7 @@ func TestMemoryStore_StreamManifests(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore()
-	events := []consult.EventV1{
+		events := []consult.EventSummary{
 		CreateTestEvent("evt-stream-1", "gpt-4", "completed"),
 		CreateTestEvent("evt-stream-2", "claude-3", "recovery"),
 	}
@@ -203,7 +203,7 @@ func TestMemoryStore_StreamManifests(t *testing.T) {
 	ctx := context.Background()
 	ch, errCh := store.StreamManifests(ctx)
 
-	var received []consult.ManifestV1
+	var received []consult.Manifest
 	for m := range ch {
 		received = append(received, m)
 	}

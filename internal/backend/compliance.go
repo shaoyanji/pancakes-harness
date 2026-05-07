@@ -2,9 +2,7 @@ package backend
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
-	"time"
 
 	"pancakes-harness/internal/consult"
 )
@@ -18,14 +16,16 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 		b := factory(t)
 		ctx := context.Background()
 
-		m := consult.ManifestV1{
-			Version:      consult.Version,
-			EventID:      "test-manifest-1",
-			Timestamp:    time.Now().UnixNano(),
-			Model:        "gpt-4",
-			Cost:         0.05,
-			Status:       "completed",
-			ParentEvents: []string{"parent-1", "parent-2"},
+		m := consult.Manifest{
+			EventID:           "test-manifest-1",
+			SessionID:         "test-session",
+			BranchID:          "main",
+			Fingerprint:       "fp-test-1",
+			Mode:              "agent_call",
+			ByteBudget:        14336,
+			ActualBytes:       640,
+			SerializerVersion: consult.SerializerVersionV1,
+			TaskSummary:       "test task",
 		}
 
 		if err := b.SaveManifest(ctx, m); err != nil {
@@ -40,11 +40,11 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 		if loaded.EventID != m.EventID {
 			t.Errorf("EventID mismatch: got %q, want %q", loaded.EventID, m.EventID)
 		}
-		if loaded.Model != m.Model {
-			t.Errorf("Model mismatch: got %q, want %q", loaded.Model, m.Model)
+		if loaded.Fingerprint != m.Fingerprint {
+			t.Errorf("Fingerprint mismatch: got %q, want %q", loaded.Fingerprint, m.Fingerprint)
 		}
-		if loaded.Status != m.Status {
-			t.Errorf("Status mismatch: got %q, want %q", loaded.Status, m.Status)
+		if loaded.SerializerVersion != m.SerializerVersion {
+			t.Errorf("SerializerVersion mismatch: got %q, want %q", loaded.SerializerVersion, m.SerializerVersion)
 		}
 	})
 
@@ -52,22 +52,15 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 		b := factory(t)
 		ctx := context.Background()
 
-		manifest := consult.ManifestV1{
-			Version:   consult.Version,
-			EventID:   "test-event-1",
-			Timestamp: time.Now().UnixNano(),
-			Model:     "claude-3",
-			Cost:      0.10,
-			Status:    "completed",
-		}
-
-		e := consult.EventV1{
-			Version:  consult.Version,
-			EventID:  "test-event-1",
-			Manifest: manifest,
-			Request:  json.RawMessage(`{"query":"test"}`),
-			Response: json.RawMessage(`{"answer":"response"}`),
-			Meta:     json.RawMessage(`{"source":"test"}`),
+		e := consult.EventSummary{
+			SchemaVersion:             consult.EventSchemaVersionV1,
+			Fingerprint:               "test-event-1",
+			ManifestSerializerVersion: consult.SerializerVersionV1,
+			Outcome:                   consult.OutcomeResolved,
+			Role:                      consult.RoleLeader,
+			ByteBudget:                14336,
+			ActualBytes:               640,
+			TaskSummary:                "test task",
 		}
 
 		if err := b.SaveEvent(ctx, e); err != nil {
@@ -79,11 +72,11 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 			t.Fatalf("LoadEvent failed: %v", err)
 		}
 
-		if loaded.EventID != e.EventID {
-			t.Errorf("EventID mismatch: got %q, want %q", loaded.EventID, e.EventID)
+		if loaded.Fingerprint != e.Fingerprint {
+			t.Errorf("Fingerprint mismatch: got %q, want %q", loaded.Fingerprint, e.Fingerprint)
 		}
-		if string(loaded.Request) != string(e.Request) {
-			t.Errorf("Request mismatch: got %q, want %q", string(loaded.Request), string(e.Request))
+		if loaded.SchemaVersion != e.SchemaVersion {
+			t.Errorf("SchemaVersion mismatch: got %q, want %q", loaded.SchemaVersion, e.SchemaVersion)
 		}
 	})
 
@@ -121,12 +114,14 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 		expectedOrder := []string{}
 		for i := 0; i < 10; i++ {
 			id := "list-test-" + string(rune('0'+i))
-			m := consult.ManifestV1{
-				Version:   consult.Version,
-				EventID:   id,
-				Timestamp: time.Now().UnixNano(),
-				Model:     "gpt-4",
-				Status:    "completed",
+			m := consult.Manifest{
+				EventID:           id,
+				SessionID:         "test-session",
+				BranchID:          "main",
+				Fingerprint:       "fp-" + id,
+				Mode:              "agent_call",
+				ByteBudget:        14336,
+				SerializerVersion: consult.SerializerVersionV1,
 			}
 			expectedOrder = append(expectedOrder, id)
 			if err := b.SaveManifest(ctx, m); err != nil {
@@ -175,14 +170,17 @@ func BackendComplianceTest(t *testing.T, factory func(testing.TB) Backend) {
 		// Create 5 manifests
 		expected := make(map[string]bool)
 		for i := 0; i < 5; i++ {
-			m := consult.ManifestV1{
-				Version:   consult.Version,
-				EventID:   "stream-test-" + string(rune('0'+i)),
-				Timestamp: time.Now().UnixNano(),
-				Model:     "gpt-4",
-				Status:    "completed",
+			id := "stream-test-" + string(rune('0'+i))
+			m := consult.Manifest{
+				EventID:           id,
+				SessionID:         "test-session",
+				BranchID:          "main",
+				Fingerprint:       "fp-" + id,
+				Mode:              "agent_call",
+				ByteBudget:        14336,
+				SerializerVersion: consult.SerializerVersionV1,
 			}
-			expected[m.EventID] = true
+			expected[id] = true
 			if err := b.SaveManifest(ctx, m); err != nil {
 				t.Fatalf("SaveManifest failed: %v", err)
 			}

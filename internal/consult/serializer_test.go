@@ -1,205 +1,145 @@
 package consult
 
 import (
-	"encoding/json"
 	"testing"
 )
 
-func TestSerialiser_ManifestRoundTrip(t *testing.T) {
+func TestEncodeDecodeManifest(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
-	m := ManifestV1{
-		Version:      Version,
-		EventID:      "evt-123",
-		Timestamp:    1700000000000000000,
-		Model:        "gpt-4",
-		Cost:         0.05,
-		Status:       "completed",
-		ParentEvents: []string{"evt-100", "evt-101"},
+	m := Manifest{
+		EventID:           "evt-123",
+		SessionID:         "sess-1",
+		BranchID:          "main",
+		Fingerprint:       "fp-123",
+		Mode:              "agent_call",
+		ByteBudget:        14336,
+		ActualBytes:       640,
+		SerializerVersion: SerializerVersionV1,
+		TaskSummary:       "test task",
 	}
 
-	data, err := s.EncodeManifest(m)
+	data, err := EncodeManifest(m)
 	if err != nil {
 		t.Fatalf("EncodeManifest failed: %v", err)
 	}
 
-	decoded, err := s.DecodeManifest(data)
+	decoded, err := DecodeManifest(data)
 	if err != nil {
 		t.Fatalf("DecodeManifest failed: %v", err)
 	}
 
-	if decoded.Version != m.Version {
-		t.Errorf("version mismatch: got %d, want %d", decoded.Version, m.Version)
-	}
 	if decoded.EventID != m.EventID {
-		t.Errorf("eventID mismatch: got %q, want %q", decoded.EventID, m.EventID)
+		t.Errorf("EventID mismatch: got %q, want %q", decoded.EventID, m.EventID)
 	}
-	if decoded.Timestamp != m.Timestamp {
-		t.Errorf("timestamp mismatch: got %d, want %d", decoded.Timestamp, m.Timestamp)
+	if decoded.SessionID != m.SessionID {
+		t.Errorf("SessionID mismatch: got %q, want %q", decoded.SessionID, m.SessionID)
 	}
-	if decoded.Model != m.Model {
-		t.Errorf("model mismatch: got %q, want %q", decoded.Model, m.Model)
+	if decoded.Fingerprint != m.Fingerprint {
+		t.Errorf("Fingerprint mismatch: got %q, want %q", decoded.Fingerprint, m.Fingerprint)
 	}
-	if decoded.Cost != m.Cost {
-		t.Errorf("cost mismatch: got %f, want %f", decoded.Cost, m.Cost)
+	if decoded.SerializerVersion != m.SerializerVersion {
+		t.Errorf("SerializerVersion mismatch: got %q, want %q", decoded.SerializerVersion, m.SerializerVersion)
 	}
-	if decoded.Status != m.Status {
-		t.Errorf("status mismatch: got %q, want %q", decoded.Status, m.Status)
-	}
-	if len(decoded.ParentEvents) != len(m.ParentEvents) {
-		t.Fatalf("parentEvents length mismatch: got %d, want %d", len(decoded.ParentEvents), len(m.ParentEvents))
-	}
-	for i, pe := range decoded.ParentEvents {
-		if pe != m.ParentEvents[i] {
-			t.Errorf("parentEvents[%d] mismatch: got %q, want %q", i, pe, m.ParentEvents[i])
-		}
+	if decoded.ByteBudget != m.ByteBudget {
+		t.Errorf("ByteBudget mismatch: got %d, want %d", decoded.ByteBudget, m.ByteBudget)
 	}
 }
 
-func TestSerialiser_EventRoundTrip(t *testing.T) {
+func TestEncodeDecodeEventSummary(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
-	manifest := ManifestV1{
-		Version:   Version,
-		EventID:   "evt-456",
-		Timestamp: 1700000000000000000,
-		Model:     "gpt-4",
-		Cost:      0.10,
-		Status:    "completed",
+	e := EventSummary{
+		SchemaVersion:             EventSchemaVersionV1,
+		Fingerprint:               "fp-456",
+		ManifestSerializerVersion: SerializerVersionV1,
+		Outcome:                   OutcomeResolved,
+		Role:                      RoleLeader,
+		ByteBudget:                14336,
+		ActualBytes:               640,
+		TaskSummary:                "test task",
 	}
 
-	e := EventV1{
-		Version:  Version,
-		EventID:  "evt-456",
-		Manifest: manifest,
-		Request:  json.RawMessage(`{"query":"test"}`),
-		Response: json.RawMessage(`{"answer":"response"}`),
-		Meta:     json.RawMessage(`{"source":"test"}`),
-	}
-
-	data, err := s.EncodeEvent(e)
+	data, err := EncodeEventSummary(e)
 	if err != nil {
-		t.Fatalf("EncodeEvent failed: %v", err)
+		t.Fatalf("EncodeEventSummary failed: %v", err)
 	}
 
-	decoded, err := s.DecodeEvent(data)
+	decoded, err := DecodeEventSummary(data)
 	if err != nil {
-		t.Fatalf("DecodeEvent failed: %v", err)
+		t.Fatalf("DecodeEventSummary failed: %v", err)
 	}
 
-	if decoded.Version != e.Version {
-		t.Errorf("event version mismatch: got %d, want %d", decoded.Version, e.Version)
+	if decoded.Fingerprint != e.Fingerprint {
+		t.Errorf("Fingerprint mismatch: got %q, want %q", decoded.Fingerprint, e.Fingerprint)
 	}
-	if decoded.EventID != e.EventID {
-		t.Errorf("event eventID mismatch: got %q, want %q", decoded.EventID, e.EventID)
+	if decoded.SchemaVersion != e.SchemaVersion {
+		t.Errorf("SchemaVersion mismatch: got %q, want %q", decoded.SchemaVersion, e.SchemaVersion)
 	}
-	if decoded.Manifest.Version != e.Manifest.Version {
-		t.Errorf("manifest version mismatch: got %d, want %d", decoded.Manifest.Version, e.Manifest.Version)
+	if decoded.ManifestSerializerVersion != e.ManifestSerializerVersion {
+		t.Errorf("ManifestSerializerVersion mismatch: got %q, want %q", decoded.ManifestSerializerVersion, e.ManifestSerializerVersion)
 	}
-	if string(decoded.Request) != string(e.Request) {
-		t.Errorf("request mismatch: got %q, want %q", string(decoded.Request), string(e.Request))
-	}
-	if string(decoded.Response) != string(e.Response) {
-		t.Errorf("response mismatch: got %q, want %q", string(decoded.Response), string(e.Response))
-	}
-	if string(decoded.Meta) != string(e.Meta) {
-		t.Errorf("meta mismatch: got %q, want %q", string(decoded.Meta), string(e.Meta))
+	if decoded.Outcome != e.Outcome {
+		t.Errorf("Outcome mismatch: got %q, want %q", decoded.Outcome, e.Outcome)
 	}
 }
 
-func TestSerialiser_DecodeUnsupportedManifestVersion(t *testing.T) {
+func TestDecodeUnsupportedManifestVersion(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
 	// Craft a manifest with unsupported version
-	badData := []byte(`{"version":99,"event_id":"evt-bad","timestamp":0,"model":"x","cost":0,"status":"ok"}`)
+	badData := []byte(`{"event_id":"evt-bad","serializer_version":"unsupported.v1"}`)
 
-	_, err := s.DecodeManifest(badData)
+	_, err := DecodeManifest(badData)
 	if err == nil {
 		t.Fatal("expected error for unsupported version, got nil")
 	}
-	if !contains(err.Error(), "unsupported manifest version") {
+	if !contains(err.Error(), "unsupported manifest serializer version") {
 		t.Errorf("expected version error, got: %v", err)
 	}
 }
 
-func TestSerialiser_DecodeUnsupportedEventVersion(t *testing.T) {
+func TestDecodeUnsupportedEventVersion(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
-	// Craft an event with unsupported version
-	badData := []byte(`{"version":99,"event_id":"evt-bad","manifest":{"version":99,"event_id":"evt-bad","timestamp":0,"model":"x","cost":0,"status":"ok"},"request":{},"response":{}}`)
+	// Craft an event with unsupported schema version
+	badData := []byte(`{"schema_version":"unsupported.v1","fingerprint":"evt-bad"}`)
 
-	_, err := s.DecodeEvent(badData)
+	_, err := DecodeEventSummary(badData)
 	if err == nil {
 		t.Fatal("expected error for unsupported version, got nil")
 	}
-	if !contains(err.Error(), "version mismatch") {
-		t.Errorf("expected version mismatch error, got: %v", err)
+	if !contains(err.Error(), "unsupported event schema version") {
+		t.Errorf("expected version error, got: %v", err)
 	}
 }
 
-func TestSerialiser_ManifestInsideEventMatchesStandalone(t *testing.T) {
+func TestManifestEventVersionAlignment(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
-	manifest := ManifestV1{
-		Version:   Version,
-		EventID:   "evt-789",
-		Timestamp: 1700000000000000000,
-		Model:     "claude-3",
-		Cost:      0.02,
-		Status:    "recovery",
+	// Event with mismatched manifest serializer version should fail
+	e := EventSummary{
+		SchemaVersion:             EventSchemaVersionV1,
+		Fingerprint:               "fp-align-test",
+		ManifestSerializerVersion: "mismatched.v1",
+		Outcome:                   OutcomeResolved,
 	}
 
-	// Encode standalone manifest
-	standaloneData, err := s.EncodeManifest(manifest)
-	if err != nil {
-		t.Fatalf("EncodeManifest failed: %v", err)
+	_, err := EncodeEventSummary(e)
+	if err == nil {
+		t.Fatal("expected error for mismatched manifest version, got nil")
 	}
-
-	// Create event with same manifest
-	event := EventV1{
-		Version:  Version,
-		EventID:  "evt-789",
-		Manifest: manifest,
-		Request:  json.RawMessage(`{}`),
-		Response: json.RawMessage(`{}`),
-	}
-
-	eventData, err := s.EncodeEvent(event)
-	if err != nil {
-		t.Fatalf("EncodeEvent failed: %v", err)
-	}
-
-	// Decode event and extract manifest
-	decodedEvent, err := s.DecodeEvent(eventData)
-	if err != nil {
-		t.Fatalf("DecodeEvent failed: %v", err)
-	}
-
-	// Encode the extracted manifest
-	extractedData, err := s.EncodeManifest(decodedEvent.Manifest)
-	if err != nil {
-		t.Fatalf("EncodeManifest (extracted) failed: %v", err)
-	}
-
-	// Compare byte-for-byte
-	if string(standaloneData) != string(extractedData) {
-		t.Errorf("standalone manifest and event-embedded manifest differ:\nstandalone: %s\nextracted: %s",
-			string(standaloneData), string(extractedData))
+	if !contains(err.Error(), "does not align") {
+		t.Errorf("expected alignment error, got: %v", err)
 	}
 }
 
-func TestSerialiser_DecodeMalformedJSON(t *testing.T) {
+func TestDecodeMalformedJSON(t *testing.T) {
 	t.Parallel()
 
-	s := Serialiser{}
 	badData := []byte(`{invalid json}`)
 
-	_, err := s.DecodeManifest(badData)
+	_, err := DecodeManifest(badData)
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
@@ -207,12 +147,24 @@ func TestSerialiser_DecodeMalformedJSON(t *testing.T) {
 		t.Errorf("expected decode error, got: %v", err)
 	}
 
-	_, err = s.DecodeEvent(badData)
+	_, err = DecodeEventSummary(badData)
 	if err == nil {
 		t.Fatal("expected error for malformed JSON, got nil")
 	}
-	if !contains(err.Error(), "event decode") {
+	if !contains(err.Error(), "event summary decode") {
 		t.Errorf("expected decode error, got: %v", err)
+	}
+}
+
+func TestVersionInfo(t *testing.T) {
+	t.Parallel()
+
+	info := VersionInfo()
+	if info["serializer_version"] != SerializerVersionV1 {
+		t.Errorf("serializer_version mismatch: got %q, want %q", info["serializer_version"], SerializerVersionV1)
+	}
+	if info["event_schema_version"] != EventSchemaVersionV1 {
+		t.Errorf("event_schema_version mismatch: got %q, want %q", info["event_schema_version"], EventSchemaVersionV1)
 	}
 }
 

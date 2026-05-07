@@ -14,6 +14,7 @@ import (
 
 	"pancakes-harness/internal/assembler"
 	"pancakes-harness/internal/backend"
+	"pancakes-harness/internal/consult"
 	"pancakes-harness/internal/eventlog"
 	"pancakes-harness/internal/model"
 	"pancakes-harness/internal/tools"
@@ -200,7 +201,7 @@ func TestGetSessionReplayIncludesConsultEvents(t *testing.T) {
 	if got.Outcome != "resolved" || got.Role != "leader" || got.Fingerprint == "" {
 		t.Fatalf("unexpected consult replay payload: %#v", got)
 	}
-	if got.ManifestSerializerVersion != "consult_manifest.v1" || got.ByteBudget <= 0 || got.ActualBytes <= 0 {
+	if got.ManifestSerializerVersion != consult.SerializerVersionV1 || got.ByteBudget <= 0 || got.ActualBytes <= 0 {
 		t.Fatalf("missing consult replay metadata: %#v", got)
 	}
 	if len(got.Selection.DominantInclusionReasons) == 0 {
@@ -451,7 +452,7 @@ func TestPostAgentCallSuccessReturnsValidJSON(t *testing.T) {
 	if consultEvent.Meta["outcome"] != "resolved" || consultEvent.Meta["role"] != "leader" {
 		t.Fatalf("unexpected consult meta: %#v", consultEvent.Meta)
 	}
-	if consultEvent.Meta["manifest_serializer_version"] != "consult_manifest.v1" {
+	if consultEvent.Meta["manifest_serializer_version"] != consult.SerializerVersionV1 {
 		t.Fatalf("unexpected consult serializer meta: %#v", consultEvent.Meta)
 	}
 	if _, ok := consultEvent.Meta["selection"].(map[string]any); !ok {
@@ -1097,8 +1098,8 @@ func TestConsultManifestSerializerVersionIsStable(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.Trace.ConsultManifest.SerializerVersion != "consult_manifest.v1" {
-		t.Fatalf("expected serializer_version=consult_manifest.v1, got %q", out.Trace.ConsultManifest.SerializerVersion)
+	if out.Trace.ConsultManifest.SerializerVersion != consult.SerializerVersionV1 {
+		t.Fatalf("expected serializer_version=%q, got %q", consult.SerializerVersionV1, out.Trace.ConsultManifest.SerializerVersion)
 	}
 }
 

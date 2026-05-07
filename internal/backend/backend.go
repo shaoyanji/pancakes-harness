@@ -33,14 +33,14 @@ type HealthStatus struct {
 // Runtime logic should depend on this interface rather than xs specifics.
 type Backend interface {
 	// Manifest operations
-	SaveManifest(ctx context.Context, m consult.ManifestV1) error
-	LoadManifest(ctx context.Context, eventID string) (consult.ManifestV1, error)
-	ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error)
-	StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error)
+	SaveManifest(ctx context.Context, m consult.Manifest) error
+	LoadManifest(ctx context.Context, eventID string) (consult.Manifest, error)
+	ListManifests(ctx context.Context, limit, offset int) ([]consult.Manifest, error)
+	StreamManifests(ctx context.Context) (<-chan consult.Manifest, <-chan error)
 
 	// Event operations
-	SaveEvent(ctx context.Context, e consult.EventV1) error
-	LoadEvent(ctx context.Context, eventID string) (consult.EventV1, error)
+	SaveEvent(ctx context.Context, e consult.EventSummary) error
+	LoadEvent(ctx context.Context, eventID string) (consult.EventSummary, error)
 
 	// Legacy eventlog operations (for backward compatibility)
 	AppendEvent(ctx context.Context, e eventlog.Event) error

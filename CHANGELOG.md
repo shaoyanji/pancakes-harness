@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## v0.2.5
+
+Release date: 2026-05-07
+
+pancakes-harness v0.2.5 unifies serializer coherence across consult manifests and consult events.
+
+This release aligns the consult manifest (response artifact) and consult event (durable record) under a single serializer version (`consult.v1`), fulfilling the v0.2.5 roadmap milestone.
+
+Key changes:
+- Unified serializer version `consult.v1` for both manifests and events
+- Updated `Manifest` type to include `EventID` for alignment with event fingerprint
+- Updated `EventSummary` to use `SchemaVersion` aligned with `SerializerVersionV1`
+- Rewrote `serializer.go` to enforce version coherence between manifests and events
+- Removed obsolete `ManifestV1`/`EventV1` types and `Serialiser` struct
+- Updated all backend implementations and tests to use correct types
+- `CHANGELOG.md` now reflects completed v0.2.5 milestone
+
+What this release does not do:
+- No new features beyond serializer alignment
+- No API changes (version string updated from `consult_manifest.v1` to `consult.v1`)
+- No behavioral changes to consult logic
+
 ## v0.2.4
 
 Release date: 2026-04-03

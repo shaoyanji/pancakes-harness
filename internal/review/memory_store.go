@@ -2,7 +2,6 @@ package review
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 
@@ -14,21 +13,21 @@ var ErrNotFound = errors.New("not found")
 
 // MemoryStore is an in-memory implementation of consultStore for testing.
 type MemoryStore struct {
-	mu       sync.RWMutex
-	events   map[string]consult.EventV1
-	manifests []consult.ManifestV1
+	mu         sync.RWMutex
+	events     map[string]consult.EventSummary
+	manifests  []consult.Manifest
 }
 
 // NewMemoryStore creates a new in-memory store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		events:    make(map[string]consult.EventV1),
-		manifests: make([]consult.ManifestV1, 0),
+		events:    make(map[string]consult.EventSummary),
+		manifests: make([]consult.Manifest, 0),
 	}
 }
 
-// SaveEvent stores an event in memory.
-func (s *MemoryStore) SaveEvent(ctx context.Context, e consult.EventV1) error {
+// SaveEvent stores an event summary in memory.
+func (s *MemoryStore) SaveEvent(ctx context.Context, e consult.EventSummary) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -37,13 +36,13 @@ func (s *MemoryStore) SaveEvent(ctx context.Context, e consult.EventV1) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.events[e.EventID] = e
-	s.manifests = append(s.manifests, e.Manifest)
+	s.events[e.Fingerprint] = e
+	s.manifests = append(s.manifests, consult.Manifest{EventID: e.Fingerprint})
 	return nil
 }
 
 // ListManifests returns manifests with pagination.
-func (s *MemoryStore) ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error) {
+func (s *MemoryStore) ListManifests(ctx context.Context, limit, offset int) ([]consult.Manifest, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -62,7 +61,7 @@ func (s *MemoryStore) ListManifests(ctx context.Context, limit, offset int) ([]c
 
 	start := offset
 	if start > len(s.manifests) {
-		return []consult.ManifestV1{}, nil
+		return []consult.Manifest{}, nil
 	}
 
 	end := start + limit
@@ -70,32 +69,32 @@ func (s *MemoryStore) ListManifests(ctx context.Context, limit, offset int) ([]c
 		end = len(s.manifests)
 	}
 
-	result := make([]consult.ManifestV1, end-start)
+	result := make([]consult.Manifest, end-start)
 	copy(result, s.manifests[start:end])
 	return result, nil
 }
 
-// GetEvent retrieves an event by ID.
-func (s *MemoryStore) GetEvent(ctx context.Context, eventID string) (consult.EventV1, error) {
+// GetEvent retrieves an event summary by fingerprint.
+func (s *MemoryStore) GetEvent(ctx context.Context, fingerprint string) (consult.EventSummary, error) {
 	select {
 	case <-ctx.Done():
-		return consult.EventV1{}, ctx.Err()
+		return consult.EventSummary{}, ctx.Err()
 	default:
 	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	e, ok := s.events[eventID]
+	e, ok := s.events[fingerprint]
 	if !ok {
-		return consult.EventV1{}, ErrNotFound
+		return consult.EventSummary{}, ErrNotFound
 	}
 	return e, nil
 }
 
 // StreamManifests returns a channel of all manifests.
-func (s *MemoryStore) StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error) {
-	ch := make(chan consult.ManifestV1)
+func (s *MemoryStore) StreamManifests(ctx context.Context) (<-chan consult.Manifest, <-chan error) {
+	ch := make(chan consult.Manifest)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -103,7 +102,7 @@ func (s *MemoryStore) StreamManifests(ctx context.Context) (<-chan consult.Manif
 		defer close(errCh)
 
 		s.mu.RLock()
-		manifests := make([]consult.ManifestV1, len(s.manifests))
+		manifests := make([]consult.Manifest, len(s.manifests))
 		copy(manifests, s.manifests)
 		s.mu.RUnlock()
 
@@ -122,13 +121,13 @@ func (s *MemoryStore) StreamManifests(ctx context.Context) (<-chan consult.Manif
 }
 
 // AddTestEvents adds test events to the store.
-func (s *MemoryStore) AddTestEvents(events []consult.EventV1) error {
+func (s *MemoryStore) AddTestEvents(events []consult.EventSummary) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, e := range events {
-		s.events[e.EventID] = e
-		s.manifests = append(s.manifests, e.Manifest)
+		s.events[e.Fingerprint] = e
+		s.manifests = append(s.manifests, consult.Manifest{EventID: e.Fingerprint})
 	}
 	return nil
 }
@@ -140,21 +139,16 @@ func (s *MemoryStore) Count() int {
 	return len(s.events)
 }
 
-// CreateTestEvent creates a test event for use in tests.
-func CreateTestEvent(eventID, model, status string) consult.EventV1 {
-	manifest := consult.ManifestV1{
-		Version:   consult.Version,
-		EventID:   eventID,
-		Model:     model,
-		Status:    status,
-		Timestamp: 1700000000000000000,
-	}
-
-	return consult.EventV1{
-		Version:  consult.Version,
-		EventID:  eventID,
-		Manifest: manifest,
-		Request:  json.RawMessage(`{"query":"test"}`),
-		Response: json.RawMessage(`{"answer":"response"}`),
+// CreateTestEvent creates a test event summary for use in tests.
+func CreateTestEvent(eventID, model, status string) consult.EventSummary {
+	return consult.EventSummary{
+		SchemaVersion:             consult.EventSchemaVersionV1,
+		Fingerprint:               eventID,
+		ManifestSerializerVersion: consult.SerializerVersionV1,
+		Outcome:                   status,
+		Role:                      consult.RoleLeader,
+		ByteBudget:                14336,
+		ActualBytes:               640,
+		TaskSummary:                "test task",
 	}
 }

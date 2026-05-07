@@ -285,7 +285,7 @@ func (a *Adapter) Close() error {
 
 // Consult manifest operations
 
-func (a *Adapter) SaveManifest(ctx context.Context, m consult.ManifestV1) error {
+func (a *Adapter) SaveManifest(ctx context.Context, m consult.Manifest) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -302,26 +302,26 @@ func (a *Adapter) SaveManifest(ctx context.Context, m consult.ManifestV1) error 
 	return nil
 }
 
-func (a *Adapter) LoadManifest(ctx context.Context, eventID string) (consult.ManifestV1, error) {
+func (a *Adapter) LoadManifest(ctx context.Context, eventID string) (consult.Manifest, error) {
 	select {
 	case <-ctx.Done():
-		return consult.ManifestV1{}, ctx.Err()
+		return consult.Manifest{}, ctx.Err()
 	default:
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	data, ok := a.blobs["manifest:"+eventID]
 	if !ok {
-		return consult.ManifestV1{}, backend.ErrNotFound
+		return consult.Manifest{}, backend.ErrNotFound
 	}
-	var m consult.ManifestV1
+	var m consult.Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return consult.ManifestV1{}, err
+		return consult.Manifest{}, err
 	}
 	return m, nil
 }
 
-func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error) {
+func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consult.Manifest, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -330,10 +330,10 @@ func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consu
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
-	var manifests []consult.ManifestV1
+	var manifests []consult.Manifest
 	for key, data := range a.blobs {
 		if strings.HasPrefix(key, "manifest:") {
-			var m consult.ManifestV1
+			var m consult.Manifest
 			if err := json.Unmarshal(data, &m); err == nil {
 				manifests = append(manifests, m)
 			}
@@ -349,7 +349,7 @@ func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consu
 
 	start := offset
 	if start > len(manifests) {
-		return []consult.ManifestV1{}, nil
+		return []consult.Manifest{}, nil
 	}
 
 	end := start + limit
@@ -360,8 +360,8 @@ func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consu
 	return manifests[start:end], nil
 }
 
-func (a *Adapter) StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error) {
-	ch := make(chan consult.ManifestV1)
+func (a *Adapter) StreamManifests(ctx context.Context) (<-chan consult.Manifest, <-chan error) {
+	ch := make(chan consult.Manifest)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -369,10 +369,10 @@ func (a *Adapter) StreamManifests(ctx context.Context) (<-chan consult.ManifestV
 		defer close(errCh)
 
 		a.mu.RLock()
-		var manifests []consult.ManifestV1
+		var manifests []consult.Manifest
 		for key, data := range a.blobs {
 			if strings.HasPrefix(key, "manifest:") {
-				var m consult.ManifestV1
+				var m consult.Manifest
 				if err := json.Unmarshal(data, &m); err == nil {
 					manifests = append(manifests, m)
 				}
@@ -396,7 +396,7 @@ func (a *Adapter) StreamManifests(ctx context.Context) (<-chan consult.ManifestV
 
 // Consult event operations
 
-func (a *Adapter) SaveEvent(ctx context.Context, e consult.EventV1) error {
+func (a *Adapter) SaveEvent(ctx context.Context, e consult.EventSummary) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -408,25 +408,25 @@ func (a *Adapter) SaveEvent(ctx context.Context, e consult.EventV1) error {
 	if err != nil {
 		return err
 	}
-	a.blobs["event:"+e.EventID] = data
+	a.blobs["event:"+e.Fingerprint] = data
 	return nil
 }
 
-func (a *Adapter) LoadEvent(ctx context.Context, eventID string) (consult.EventV1, error) {
+func (a *Adapter) LoadEvent(ctx context.Context, eventID string) (consult.EventSummary, error) {
 	select {
 	case <-ctx.Done():
-		return consult.EventV1{}, ctx.Err()
+		return consult.EventSummary{}, ctx.Err()
 	default:
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	data, ok := a.blobs["event:"+eventID]
 	if !ok {
-		return consult.EventV1{}, backend.ErrNotFound
+		return consult.EventSummary{}, backend.ErrNotFound
 	}
-	var e consult.EventV1
+	var e consult.EventSummary
 	if err := json.Unmarshal(data, &e); err != nil {
-		return consult.EventV1{}, err
+		return consult.EventSummary{}, err
 	}
 	return e, nil
 }

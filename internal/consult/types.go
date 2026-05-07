@@ -1,10 +1,10 @@
 package consult
 
-// SerializerVersionV1 is the canonical serializer version for consult manifests.
-const SerializerVersionV1 = "consult_manifest.v1"
+// SerializerVersionV1 is the unified serializer version for both consult manifests and events.
+const SerializerVersionV1 = "consult.v1"
 
-// EventSchemaVersionV1 is the canonical schema version for durable consult events.
-const EventSchemaVersionV1 = "consult_event.v1"
+// EventSchemaVersionV1 is aligned with the manifest serializer version for coherence.
+const EventSchemaVersionV1 = SerializerVersionV1
 
 const (
 	OutcomeResolved   = "resolved"
@@ -62,6 +62,7 @@ type Input struct {
 
 // Manifest is the deterministic, human-reviewable consult artifact.
 type Manifest struct {
+	EventID           string                `json:"event_id"`
 	SessionID         string                `json:"session_id"`
 	BranchID          string                `json:"branch_id"`
 	Fingerprint       string                `json:"fingerprint"`

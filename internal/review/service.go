@@ -17,9 +17,9 @@ type ReviewSvc struct {
 
 // consultStore is the minimal adapter subset needed for review.
 type consultStore interface {
-	ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error)
-	GetEvent(ctx context.Context, eventID string) (consult.EventV1, error)
-	StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error)
+	ListManifests(ctx context.Context, limit, offset int) ([]consult.Manifest, error)
+	GetEvent(ctx context.Context, eventID string) (consult.EventSummary, error)
+	StreamManifests(ctx context.Context) (<-chan consult.Manifest, <-chan error)
 }
 
 // NewReviewSvc creates a new review service with the given store.
@@ -28,15 +28,15 @@ func NewReviewSvc(store consultStore) *ReviewSvc {
 }
 
 // ListRecent returns the most recent consult manifests.
-func (s *ReviewSvc) ListRecent(ctx context.Context, limit int) ([]consult.ManifestV1, error) {
-	if limit <= 0 {
+func (s *ReviewSvc) ListRecent(ctx context.Context, limit int) ([]consult.Manifest, error) {
+	if limit <=0 {
 		limit = 20
 	}
 	return s.store.ListManifests(ctx, limit, 0)
 }
 
 // Show returns the full consult event for the given event ID.
-func (s *ReviewSvc) Show(ctx context.Context, eventID string) (consult.EventV1, error) {
+func (s *ReviewSvc) Show(ctx context.Context, eventID string) (consult.EventSummary, error) {
 	return s.store.GetEvent(ctx, eventID)
 }
 

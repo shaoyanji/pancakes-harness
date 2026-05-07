@@ -14,8 +14,8 @@ type MemoryBackend struct {
 	byID      map[string]map[string]eventlog.Event
 	blobs     map[string][]byte
 	diag      []Diagnostic
-	manifests map[string]consult.ManifestV1
-	events    map[string]consult.EventV1
+	manifests map[string]consult.Manifest
+	events    map[string]consult.EventSummary
 }
 
 func NewMemoryBackend() *MemoryBackend {
@@ -23,8 +23,8 @@ func NewMemoryBackend() *MemoryBackend {
 		sessions:  make(map[string][]eventlog.Event),
 		byID:      make(map[string]map[string]eventlog.Event),
 		blobs:     make(map[string][]byte),
-		manifests: make(map[string]consult.ManifestV1),
-		events:    make(map[string]consult.EventV1),
+		manifests: make(map[string]consult.Manifest),
+		events:    make(map[string]consult.EventSummary),
 	}
 }
 
@@ -204,7 +204,7 @@ func cloneDiagnostics(in []Diagnostic) []Diagnostic {
 
 // Consult manifest operations
 
-func (b *MemoryBackend) SaveManifest(ctx context.Context, m consult.ManifestV1) error {
+func (b *MemoryBackend) SaveManifest(ctx context.Context, m consult.Manifest) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -216,22 +216,22 @@ func (b *MemoryBackend) SaveManifest(ctx context.Context, m consult.ManifestV1) 
 	return nil
 }
 
-func (b *MemoryBackend) LoadManifest(ctx context.Context, eventID string) (consult.ManifestV1, error) {
+func (b *MemoryBackend) LoadManifest(ctx context.Context, eventID string) (consult.Manifest, error) {
 	select {
 	case <-ctx.Done():
-		return consult.ManifestV1{}, ctx.Err()
+		return consult.Manifest{}, ctx.Err()
 	default:
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	m, ok := b.manifests[eventID]
 	if !ok {
-		return consult.ManifestV1{}, ErrNotFound
+		return consult.Manifest{}, ErrNotFound
 	}
 	return m, nil
 }
 
-func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([]consult.ManifestV1, error) {
+func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([]consult.Manifest, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -241,13 +241,13 @@ func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([
 	defer b.mu.RUnlock()
 
 	// Collect manifests in a deterministic order (sorted by EventID)
-	result := make([]consult.ManifestV1, 0, len(b.manifests))
+	result := make([]consult.Manifest, 0, len(b.manifests))
 	ids := make([]string, 0, len(b.manifests))
 	for id := range b.manifests {
 		ids = append(ids, id)
 	}
 	// Sort for deterministic ordering
-	for i := 0; i < len(ids); i++ {
+	for i :=0; i < len(ids); i++ {
 		for j := i + 1; j < len(ids); j++ {
 			if ids[i] > ids[j] {
 				ids[i], ids[j] = ids[j], ids[i]
@@ -259,15 +259,15 @@ func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([
 	}
 
 	if offset < 0 {
-		offset = 0
+		offset =0
 	}
-	if limit <= 0 {
+	if limit <=0 {
 		limit = len(result)
 	}
 
 	start := offset
 	if start > len(result) {
-		return []consult.ManifestV1{}, nil
+		return []consult.Manifest{}, nil
 	}
 
 	end := start + limit
@@ -278,8 +278,8 @@ func (b *MemoryBackend) ListManifests(ctx context.Context, limit, offset int) ([
 	return result[start:end], nil
 }
 
-func (b *MemoryBackend) StreamManifests(ctx context.Context) (<-chan consult.ManifestV1, <-chan error) {
-	ch := make(chan consult.ManifestV1)
+func (b *MemoryBackend) StreamManifests(ctx context.Context) (<-chan consult.Manifest, <-chan error) {
+	ch := make(chan consult.Manifest)
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -287,7 +287,7 @@ func (b *MemoryBackend) StreamManifests(ctx context.Context) (<-chan consult.Man
 		defer close(errCh)
 
 		b.mu.RLock()
-		manifests := make([]consult.ManifestV1, 0, len(b.manifests))
+		manifests := make([]consult.Manifest, 0, len(b.manifests))
 		for _, m := range b.manifests {
 			manifests = append(manifests, m)
 		}
@@ -309,7 +309,7 @@ func (b *MemoryBackend) StreamManifests(ctx context.Context) (<-chan consult.Man
 
 // Consult event operations
 
-func (b *MemoryBackend) SaveEvent(ctx context.Context, e consult.EventV1) error {
+func (b *MemoryBackend) SaveEvent(ctx context.Context, e consult.EventSummary) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -317,21 +317,21 @@ func (b *MemoryBackend) SaveEvent(ctx context.Context, e consult.EventV1) error 
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.events[e.EventID] = e
+	b.events[e.Fingerprint] = e
 	return nil
 }
 
-func (b *MemoryBackend) LoadEvent(ctx context.Context, eventID string) (consult.EventV1, error) {
+func (b *MemoryBackend) LoadEvent(ctx context.Context, eventID string) (consult.EventSummary, error) {
 	select {
 	case <-ctx.Done():
-		return consult.EventV1{}, ctx.Err()
+		return consult.EventSummary{}, ctx.Err()
 	default:
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	e, ok := b.events[eventID]
 	if !ok {
-		return consult.EventV1{}, ErrNotFound
+		return consult.EventSummary{}, ErrNotFound
 	}
 	return e, nil
 }
