@@ -89,3 +89,6 @@ target/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+# needle3 experiment: weights and splits are rebuilt by scripts/needle_finetune.sh
+checkpoints/
+scripts/needle-data/

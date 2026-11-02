@@ -370,6 +370,78 @@ sidecar record — extraction latency, the gate decision, and the flags the reco
 carries. The sidecar is async by design, so its line arrives after the turn
 response, on the bridge's stderr.
 
+### Fine-tuning it on the harness's own tools
+
+`scripts/needle_finetune.sh` turns the four typed tools in `internal/tooling`
+(`glob`, `grep`, `read`, `write`) into a training set, trains a LoRA adapter on a
+12-layer rung of needle3, and scores the base rung and the tuned archive on a
+held-out split. Measured on a 2-core / 8 GB codespace, CPU only, 160 held-out
+rows of which 152 are callable:
+
+| | base rung | + LoRA (1 epoch) | |
+| :--- | ---: | ---: | :--- |
+| correct tool set | 13.8% | **31.6%** | 2.3x |
+| exact arguments | 5.3% | **13.2%** | 2.5x |
+| exact call | 5.3% | 9.2% | |
+| multi-call rituals | 0% | 0% | |
+| refusals correct (n=8) | 100% | 100% | |
+| latency p50 | 376 ms | 241 ms | 246 ms mean |
+| peak RSS | ~100 MB | ~100 MB | |
+
+Four things the numbers mean, in the order they matter for using this:
+
+- **The stock model does not answer a command-style request at all.** Asked to
+  "cat the contents of internal/preprocess/needle.go", the untuned archive
+  returns `function_calls: []` and reasons *"no document retrieval tool
+  available"* — the tool list is right there in its prompt. Emitting a call for
+  an imperative is the behaviour the adapter adds; picking the right one is the
+  part it learns least (2.3x, from a low base).
+- **Arguments are the weak axis.** Even with the tool name right the model
+  substitutes keys it prefers (`pattern`, `file_name`, `file`) for the schema's
+  `ref`, and sometimes repeats a value until the token budget runs out
+  (`internal/compactor/compactor/compactor/compactor.go`). 13.2% exact arguments
+  makes this a router, not an executor: validate a call against the tool's
+  JSON schema before running it, and keep the human in the loop for the rest.
+- **The shape of the tool block is most of the signal.** The first attempt fed a
+  flat `{"name": "read", "args": {"ref": "string"}}` list. Over two epochs it
+  reached 32.2% tool names and **0.0%** exact arguments, because nothing in the
+  prompt tied a value to a key. Keeping `parameters.properties` and dropping
+  only the prose moved arguments to 13.2% on a *single* epoch, and lifted the
+  base rung from 0.0% to 5.3% on the same change — the base model needed the
+  schema too.
+- **Depth is a memory wall, not a quality choice.** A 20-layer training compile
+  needs about 4.5 GB and is killed on this runner (SIGTERM, ~4.5 GB RSS); 12
+  layers peaks at 3.9 GB. `needle build --layers` makes a rung a normal artifact,
+  and both sides of the table are the same rung, so the delta is only the
+  adapter.
+
+The tool schemas are dumped from the Go registry rather than hand-written, so the
+dataset cannot drift from the code it describes:
+
+```bash
+go run ./scripts/dumptools > scripts/needle_tools.json
+PY=.venv-train/bin/python NEEDLE=.venv-train/bin/needle EPOCHS=2 \
+  bash scripts/needle_finetune.sh
+```
+
+The training venv is not committed (`cactus-needle[train]` wants python 3.12 and
+pulls jax, flax and optax):
+
+```bash
+virtualenv -p python3.12 .venv-train
+.venv-train/bin/pip install 'cactus-needle[train]==3.2.9'
+```
+
+`scripts/needle_rituals.py` splits paths, patterns and text by a sha1 of each
+value, so the held-out set stays disjoint as the repo grows, and it refuses a
+split whose call arguments overlap. Everything the pipeline writes —
+`checkpoints/` (150 MB rung) and `scripts/needle-data/` (39 MB `.cact` archives,
+the adapter, the predictions) — is gitignored and rebuilt by that command.
+
+The tuned archive is a tool caller, not an extraction model: point
+`NEEDLE_WEIGHTS` at it for a tool-calling workload, and leave §9's sidecar on the
+published weights, which are what the `Extraction` schema was trained against.
+
 ---
 
 ## 10. Configuration

@@ -1,0 +1,82 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "glob",
+      "description": "List files matching a pattern",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "grep",
+      "description": "Search for a pattern in text",
+      "parameters": {
+        "properties": {
+          "pattern": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "text"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read",
+      "description": "Read content by reference",
+      "parameters": {
+        "properties": {
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write",
+      "description": "Write content by reference",
+      "parameters": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "ref"
+        ],
+        "type": "object"
+      }
+    }
+  }
+]
