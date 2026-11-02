@@ -86,8 +86,20 @@ def split_of(value, train_percent=55):
     return "train" if int(digest[:8], 16) % 100 < train_percent else "eval"
 
 
-def repo_paths():
-    """Every source and docs path in the checkout, relative to the root."""
+CORPUS = os.path.join(REPO_ROOT, "scripts", "needle-data", "corpus.json")
+
+
+def repo_paths(refresh=False):
+    """The corpus the tools operate on, pinned to scripts/needle-data/corpus.json.
+
+    The split is stable per value, but the sample was drawn from a pool that grew
+    with the tree: adding one .py file shifted three eval rows, so two runs a day
+    apart were not scored on the same set. The pool is pinned on first use and
+    reused; --refresh-corpus re-pins it deliberately.
+    """
+    if os.path.exists(CORPUS) and not refresh:
+        with open(CORPUS, encoding="utf-8") as handle:
+            return sorted(json.load(handle)["paths"])
     skip = {".git", "node_modules", "__pycache__", "tmp_dumptools", "needle-data"}
     out = []
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
@@ -98,6 +110,11 @@ def repo_paths():
             if name.endswith("_test.go"):
                 continue
             out.append(os.path.relpath(os.path.join(dirpath, name), REPO_ROOT))
+    out.sort()
+    os.makedirs(os.path.dirname(CORPUS), exist_ok=True)
+    with open(CORPUS, "w", encoding="utf-8") as handle:
+        json.dump({"paths": out}, handle, indent=2)
+        handle.write("\n")
     return out
 
 
@@ -216,12 +233,15 @@ def main(argv=None):
     parser.add_argument("command", choices=["gen"])
     parser.add_argument("--out-dir", default=os.path.join(REPO_ROOT, "scripts", "needle-data"))
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--refresh-corpus", action="store_true",
+                        help="re-pin the corpus from the current tree")
     args = parser.parse_args(argv)
 
     tools_path = os.path.join(REPO_ROOT, "scripts", "needle_tools.json")
     with open(tools_path, encoding="utf-8") as handle:
         tools = compact(json.load(handle))
 
+    repo_paths(refresh=args.refresh_corpus)  # pin/refresh the corpus before sampling
     os.makedirs(args.out_dir, exist_ok=True)
     with open(os.path.join(args.out_dir, "tools.json"), "w", encoding="utf-8") as handle:
         json.dump(tools, handle, indent=2)

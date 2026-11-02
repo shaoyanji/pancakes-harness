@@ -36,18 +36,21 @@ echo "== finetune"
   --out "$DATA/rituals-lora.safetensors" \
   --epochs "$EPOCHS" --lora-rank "$RANK" --batch-size 4 --val-split 0.05
 
-echo "== build"
+echo "== build: base rung, then the adapter merged over it"
+"$NEEDLE" build "$BASE" --out "$DATA/rituals-base.cact"
 "$NEEDLE" build "$BASE" --lora "$DATA/rituals-lora.safetensors" --out "$DATA/rituals-tuned.cact"
 
-echo "== benchmark: base rung"
-"$PY" scripts/needle_bench.py --checkpoint "$BASE" \
-  --eval "$DATA/eval.jsonl" --label "base-rung$DEPTH" \
-  --out "$DATA/predictions-base.jsonl" --report "$DATA/report-base.json"
-
-echo "== benchmark: tuned"
-"$PY" scripts/needle_bench.py --checkpoint "$BASE" --adapter "$DATA/rituals-lora.safetensors" \
-  --eval "$DATA/eval.jsonl" --label "tuned-rung$DEPTH" \
-  --out "$DATA/predictions-tuned.jsonl" --report "$DATA/report-tuned.json"
+# Score both archives through the .cact engine, which is the deployed runtime and
+# the only usable benchmark: it keeps a KV cache, where the pure-JAX decoder in
+# needle.model.run re-runs the whole prefix per token (16-26 s per row here).
+for pair in base:rituals-base tuned:rituals-tuned; do
+  label=${pair%%:*}
+  archive=${pair##*:}
+  echo "== benchmark: $label"
+  "$PY" scripts/needle_bench.py --weights "$DATA/$archive.cact" \
+    --eval "$DATA/eval.jsonl" --label "$label-rung$DEPTH" \
+    --out "$DATA/predictions-$label.jsonl" --report "$DATA/report-$label.json"
+done
 
 echo "== done"
 ls -la "$DATA"
