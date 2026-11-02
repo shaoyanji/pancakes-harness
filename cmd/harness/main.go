@@ -21,6 +21,7 @@ import (
 	"pancakes-harness/internal/memory"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
+	"pancakes-harness/internal/preprocess"
 	"pancakes-harness/internal/runtime"
 	"pancakes-harness/internal/server"
 	"pancakes-harness/internal/tools"
@@ -53,6 +54,9 @@ const (
 	envMemoryIndexSize     = "MEMORY_INDEX_SIZE"
 	envCompactionTurns     = "COMPACTION_TURNS"
 	envCompactionRatio     = "COMPACTION_RATIO"
+	envPreprocessMode      = "HARNESS_PREPROCESS"
+	envNeedlePython        = "NEEDLE_PYTHON"
+	envNeedleBridge        = "NEEDLE_BRIDGE"
 )
 
 var (
@@ -60,6 +64,7 @@ var (
 	errConflictingAuth      = errors.New("set either auth key/header or bearer token, not both")
 	errUnsupportedModelMode = errors.New("unsupported model mode")
 	errUnsupportedBackend   = errors.New("unsupported backend mode")
+	errUnsupportedPreprocess = errors.New("unsupported preprocess mode")
 )
 
 const releaseVersion = "0.3.1"
@@ -88,6 +93,11 @@ type launcherConfig struct {
 	memoryIndexSize     int
 	compactionTurns     int
 	compactionRatio     float64
+
+	// Local fast sidecar: "off" (default) or "needle"
+	preprocessMode string
+	needlePython   string
+	needleBridge   string
 }
 
 type serveConfig struct {
@@ -196,6 +206,20 @@ func runServe(args []string, stdout, stderr io.Writer, getenv func(string) strin
 	toolReg := tooling.NewRegistry()
 	tooling.RegisterBuiltinTools(toolReg)
 
+	// The fast sidecar lives as long as the server, not as long as a request.
+	preprocessor, err := buildPreprocessor(cfg.launcher, backendEventLog{b})
+	if err != nil {
+		fmt.Fprintf(stderr, "preprocess error: %v\n", err)
+		return 2
+	}
+	var sidecar runtime.Preprocessor
+	if preprocessor != nil {
+		preprocessor.Start(context.Background())
+		defer preprocessor.Stop()
+		sidecar = preprocessor
+		fmt.Fprintf(stdout, "preprocess: %s sidecar (local)\n", cfg.launcher.preprocessMode)
+	}
+
 	metricsReg := metrics.NewRegistry()
 
 	api, err := server.New(server.Config{
@@ -211,6 +235,7 @@ func runServe(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		DreamDaemon:   dreamDaemon,
 		AuditConfig:   auditCfg,
 		ToolRegistry:  toolReg,
+		Preprocessor:  sidecar,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "server init error: %v\n", err)
@@ -305,6 +330,9 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	memoryIndexDefault, _ := parseIntOrDefault(getenv(envMemoryIndexSize), 1024)
 	compactionTurnsDefault, _ := parseIntOrDefault(getenv(envCompactionTurns), 10)
 	compactionRatioDefault := parseFloatOrDefault(getenv(envCompactionRatio), 0.8)
+	preprocessModeDefault := stringOrDefault(getenv(envPreprocessMode), "off")
+	needlePythonDefault := strings.TrimSpace(getenv(envNeedlePython))
+	needleBridgeDefault := strings.TrimSpace(getenv(envNeedleBridge))
 
 	fs := flag.NewFlagSet("harness", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -334,6 +362,9 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	memoryIndexSize := memoryIndexDefault
 	compactionTurns := compactionTurnsDefault
 	compactionRatio := compactionRatioDefault
+	preprocessMode := preprocessModeDefault
+	needlePython := needlePythonDefault
+	needleBridge := needleBridgeDefault
 
 	fs.StringVar(&modelMode, "model-mode", modelModeDefault, "model adapter mode: mock|http|ollama")
 	fs.StringVar(&modelEndpoint, "model-endpoint", modelEndpointDefault, "HTTP model endpoint URL")
@@ -361,6 +392,11 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	fs.IntVar(&compactionTurns, "compaction-turns", compactionTurnsDefault, "trigger compaction every N turns")
 	fs.Float64Var(&compactionRatio, "compaction-ratio", compactionRatioDefault, "trigger compaction at this budget ratio")
 
+	// Local fast sidecar (no API key)
+	fs.StringVar(&preprocessMode, "preprocess", preprocessModeDefault, "fast ingress sidecar: off|needle")
+	fs.StringVar(&needlePython, "needle-python", needlePythonDefault, "python interpreter for the needle bridge")
+	fs.StringVar(&needleBridge, "needle-bridge", needleBridgeDefault, "path to scripts/needle_bridge.py")
+
 	if err := fs.Parse(args); err != nil {
 		return parsedFlags{}, err
 	}
@@ -382,6 +418,16 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 	}
 	if backendMode != "memory" && backendMode != "xs" {
 		return parsedFlags{}, fmt.Errorf("%w: %q", errUnsupportedBackend, backendMode)
+	}
+	preprocessMode = strings.ToLower(strings.TrimSpace(preprocessMode))
+	if preprocessMode == "" {
+		preprocessMode = "off"
+	}
+	if preprocessMode != "off" && preprocessMode != "needle" {
+		return parsedFlags{}, fmt.Errorf("%w: %q", errUnsupportedPreprocess, preprocessMode)
+	}
+	if preprocessMode == "needle" && needleBridge == "" {
+		return parsedFlags{}, fmt.Errorf("needle bridge is required when preprocess=%s (set %s)", preprocessMode, envNeedleBridge)
 	}
 	if modelMode == "http" && modelEndpoint == "" {
 		return parsedFlags{}, errors.New("model endpoint is required in http mode")
@@ -420,6 +466,9 @@ func parseLauncherFlags(args []string, getenv func(string) string) (parsedFlags,
 			memoryIndexSize:     memoryIndexSize,
 			compactionTurns:     compactionTurns,
 			compactionRatio:     compactionRatio,
+			preprocessMode:      preprocessMode,
+			needlePython:        needlePython,
+			needleBridge:        needleBridge,
 		},
 		bindAddr:      strings.TrimSpace(serveBind),
 		port:          servePort,
@@ -587,6 +636,34 @@ func (w backendEventLog) AppendEvent(ctx context.Context, e eventlog.Event) erro
 	return w.b.AppendEvent(ctx, e)
 }
 
+// buildPreprocessor starts the fast ingress sidecar, or returns nil when it is
+// switched off. A nil *Daemon is never handed to the server: the caller wraps
+// it so an off switch cannot become a nil-interface panic.
+func buildPreprocessor(cfg launcherConfig, eventLog preprocess.EventLog) (*preprocess.Daemon, error) {
+	switch cfg.preprocessMode {
+	case "", "off":
+		return nil, nil
+	case "needle":
+		adapter, err := preprocess.NewNeedleAdapter(preprocess.NeedleConfig{
+			Python:  cfg.needlePython,
+			Bridge:  cfg.needleBridge,
+			Timeout: preprocess.DefaultNeedleTimeout,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return preprocess.NewDaemon(preprocess.Config{
+			FastAdapter: adapter,
+			EventLog:    eventLog,
+			Timeout:     preprocess.DefaultNeedleTimeout,
+			MaxWorkers:  1,
+			QueueSize:   32,
+		})
+	default:
+		return nil, fmt.Errorf("%w: %q", errUnsupportedPreprocess, cfg.preprocessMode)
+	}
+}
+
 func buildAuditConfig(cfg launcherConfig) audit.Config {
 	maxTokens := cfg.maxTokensPerConsult
 	if maxTokens <= 0 {
@@ -704,8 +781,15 @@ Flags:
         bind address (serve mode)
   -port int
         bind port (serve mode)
+  -preprocess string
+        fast ingress sidecar: off|needle (local, no API key)
+  -needle-python string
+        python interpreter for the needle bridge
+  -needle-bridge string
+        path to scripts/needle_bridge.py
 
 Example:
   harness serve -model-mode ollama -ollama-model qwen3:0.6b -bind 127.0.0.1 -port 8080
+  harness serve -model-mode mock -preprocess needle -needle-bridge scripts/needle_bridge.py
 `
 }

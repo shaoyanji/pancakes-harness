@@ -323,6 +323,53 @@ if s.preprocessor != nil {
 
 The session continues to packet assembly immediately — preprocessing runs in the background and its results are available for the next turn or for memory indexing.
 
+### Local backend: needle3 + laya (no API key)
+
+The `FastAdapter` seam also has a local implementation. `-preprocess needle`
+starts `scripts/needle_bridge.py` as a long-lived child process and speaks JSON
+lines with it: one request per ingress turn, one record per line back.
+
+| Stage | Model | Cost (measured, 2 vCPU codespace) |
+| :--- | :--- | :--- |
+| extraction | Needle 3 (Cactus Compute, 2-bit, 8-29 MB `.cact`) | 0.3–3.0 s, ~130 MB RSS |
+| gate | laya (System One decision engine, `scripts/vendor/systemone_engine.py`) | <1 ms, stdlib only |
+
+Both are local: no key, no per-token cost, and the weights are fetched once
+(35 MB) and then run with `HF_HUB_OFFLINE=1`.
+
+What needle3 actually does here, stated plainly because it shapes the design:
+
+- **It is a tool caller, not a chat model.** `run()` refuses a message that is
+  not a request for an action (0 of 1 command-style samples produced a record),
+  so the bridge uses `extract()`, which records the message itself (2 of 3
+  samples produced a record; the miss is recorded as `uncertain`).
+- **The constrained decoder guarantees shape, not values.** With an enum-typed
+  dataclass schema every field parses, but a free numeric field comes back on
+  the model's own scale — `95.0` where the schema means `0.95`. The bridge
+  normalizes above 1 as a percentage and clamps to 0.0–1.0.
+- **`strict=True` rejects extraction outright.** The grounding validator calls
+  every derived field fabricated (a confidence is not a substring of the
+  message), so the bridge calls `extract(..., strict=False)`.
+- **Topics need trimming.** Unconstrained, the model answers with all eight
+  topic tags; the bridge keeps the first three.
+
+The laya gate answers one question — *act on this locally, or escalate?* — with
+its own calibrated confidence. It only escalates above `0.75` (laya's own
+`min_confidence_threshold`), so in practice it lets most turns through and
+flags the rest with `needs_review`; a measured gate on ordinary messages reads
+`act` at 0.50–0.70. It is a second opinion, not a second model.
+
+The whole loop is one command:
+
+```bash
+NEEDLE_PYTHON=~/needle-venv/bin/python scripts/ritual_demo.sh
+```
+
+It serves the harness with `-preprocess needle`, posts one turn, and prints the
+sidecar record — extraction latency, the gate decision, and the flags the record
+carries. The sidecar is async by design, so its line arrives after the turn
+response, on the bridge's stderr.
+
 ---
 
 ## 10. Configuration
@@ -383,7 +430,8 @@ The Groq adapter is the primary fast model backend, but the `FastAdapter` interf
 - Schema adherence without API latency for development/testing
 - Same golden schema contract regardless of backend
 
-The daemon's fail-fast design means a local fallback adapter can be swapped in without changing the event loop or spine integration.
+The daemon's fail-fast design means a local fallback adapter can be swapped in without changing the event loop or spine integration. `internal/preprocess/needle.go`
+(see §9) is that adapter for Needle 3, and it needs no API key at all.
 
 ### Embedding Model Integration
 

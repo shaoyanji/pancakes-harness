@@ -47,10 +47,13 @@ type Config struct {
 	ModelMode    string
 
 	// New v0.3.0 fields
-	MemoryManager  *memory.Manager
-	DreamDaemon    *dream.Daemon
-	AuditConfig    audit.Config
-	ToolRegistry   *tooling.Registry
+	MemoryManager *memory.Manager
+	DreamDaemon   *dream.Daemon
+	AuditConfig   audit.Config
+	ToolRegistry  *tooling.Registry
+
+	// Preprocessor is the fast ingress sidecar every session shares.
+	Preprocessor runtime.Preprocessor
 }
 
 type Server struct {
@@ -784,6 +787,7 @@ func (s *Server) startSessionWithRunner(sessionID, defaultBranchID string, runne
 		ToolRunner:      runner,
 		ModelHeaders:    s.cfg.ModelHeaders,
 		Metrics:         s.cfg.Metrics,
+		Preprocessor:    s.cfg.Preprocessor,
 	})
 }
 

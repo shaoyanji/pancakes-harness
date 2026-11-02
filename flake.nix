@@ -6,36 +6,64 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    { self, nixpkgs, flake-utils }:
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         pkgs = import nixpkgs {
           inherit system;
         };
         lib = pkgs.lib;
-        version = "0.3.0";
+
+        # The release version lives in the Go sources and installCheck compares the
+        # built binary against it, so read it there: a second copy in this file
+        # drifts silently and then fails the build for the wrong reason.
+        readVersion = {
+          file,
+          pattern,
+        }: let
+          hits = builtins.filter (m: m != null) (
+            map (line: builtins.match pattern line) (lib.splitString "\n" (builtins.readFile file))
+          );
+        in
+          if hits == []
+          then throw "readVersion: ${pattern} did not match any line of ${toString file}"
+          else builtins.head (builtins.head hits);
 
         # Canonical Go toolchain for this project (matches go.mod: go 1.23)
         go = pkgs.go_1_23;
 
-        mkBinary =
-          {
-            pname,
-            subPackage,
-            binaryName,
-          }:
+        mkBinary = {
+          pname,
+          subPackage,
+          binaryName,
+          versionFile,
+          versionPattern,
+        }: let
+          version = readVersion {
+            file = versionFile;
+            pattern = versionPattern;
+          };
+        in
           pkgs.buildGoModule {
             inherit pname version go;
             src = ./.;
             vendorHash = null;
-            subPackages = [ subPackage ];
+            subPackages = [subPackage];
 
             ldflags = [
               "-s"
               "-w"
             ];
+
+            # buildGoModule names the binary after its subpackage directory;
+            # install under the name the docs and `apps` promise.
+            postInstall = lib.optionalString (builtins.baseNameOf subPackage != binaryName) ''
+              mv "$out/bin/${builtins.baseNameOf subPackage}" "$out/bin/${binaryName}"
+            '';
 
             doInstallCheck = true;
             installCheckPhase = ''
@@ -54,49 +82,61 @@
           pname = "pancakes-harness";
           subPackage = "cmd/harness";
           binaryName = "harness";
+          versionFile = ./cmd/harness/main.go;
+          versionPattern = ".*releaseVersion = \"([0-9][^\"]*)\".*";
         };
 
         demoCli = mkBinary {
           pname = "pancakes-harness-demo-cli";
           subPackage = "cmd/demo-cli";
           binaryName = "demo-cli";
+          versionFile = ./cmd/demo-cli/main.go;
+          versionPattern = ".*demo-cli ([0-9][0-9.]*).*";
         };
 
         dream = mkBinary {
           pname = "pancakes-harness-dream";
           subPackage = "cmd/dream";
           binaryName = "dream-daemon";
+          versionFile = ./cmd/dream/main.go;
+          versionPattern = ".*const version = \"([0-9][^\"]*)\".*";
         };
 
-        tests = pkgs.buildGoModule {
-          pname = "pancakes-harness-tests";
-          inherit version go;
-          src = ./.;
-          vendorHash = null;
-          subPackages = [ "cmd/harness" ];
+        # The test suite builds the sources once and runs go test over all packages.
+        tests = let
+          version = readVersion {
+            file = ./cmd/harness/main.go;
+            pattern = ".*releaseVersion = \"([0-9][^\"]*)\".*";
+          };
+        in
+          pkgs.buildGoModule {
+            pname = "pancakes-harness-tests";
+            inherit version go;
+            src = ./.;
+            vendorHash = null;
+            subPackages = ["cmd/harness"];
 
-          doCheck = true;
-          checkPhase = ''
-            runHook preCheck
-            export HOME="$TMPDIR"
-            export GOCACHE="$TMPDIR/go-cache"
-            go test -p 1 ./...
-            runHook postCheck
-          '';
+            doCheck = true;
+            checkPhase = ''
+              runHook preCheck
+              export HOME="$TMPDIR"
+              export GOCACHE="$TMPDIR/go-cache"
+              go test -p 1 ./...
+              runHook postCheck
+            '';
 
-          buildPhase = ''
-            runHook preBuild
-            runHook postBuild
-          '';
+            buildPhase = ''
+              runHook preBuild
+              runHook postBuild
+            '';
 
-          installPhase = ''
-            runHook preInstall
-            mkdir -p "$out"
-            runHook postInstall
-          '';
-        };
-      in
-      {
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              runHook postInstall
+            '';
+          };
+      in {
         packages = {
           default = harness;
           harness = harness;
@@ -138,6 +178,7 @@
         checks = {
           harness = harness;
           demo-cli = demoCli;
+          dream = dream;
           tests = tests;
         };
       }

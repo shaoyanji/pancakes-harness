@@ -396,11 +396,34 @@ func TestDaemon_Timeout(t *testing.T) {
 	}
 }
 
+// blockingAdapter holds every call until the test releases it, so the worker is
+// reliably busy while the queue fills instead of racing a sleep.
+type blockingAdapter struct {
+	started  chan struct{}
+	release  chan struct{}
+	response []byte
+}
+
+func (b *blockingAdapter) Name() string { return "blocking-fast" }
+
+func (b *blockingAdapter) Call(ctx context.Context, prompt, text string) ([]byte, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+		return b.response, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func TestDaemon_QueueFull(t *testing.T) {
-	// Adapter that blocks forever to fill the queue
-	adapter := &mockAdapter{
+	adapter := &blockingAdapter{
+		started:  make(chan struct{}, 1),
+		release:  make(chan struct{}),
 		response: validExtractionJSON(),
-		delay:    10 * time.Second,
 	}
 	el := &mockEventLog{}
 
@@ -415,14 +438,23 @@ func TestDaemon_QueueFull(t *testing.T) {
 	ctx := context.Background()
 	d.Start(ctx)
 	defer d.Stop()
+	defer close(adapter.release)
 
-	// Fill queue (worker is blocked, so queue fills up)
-	d.Submit(Job{ID: "q1", Text: "a"})
-	d.Submit(Job{ID: "q2", Text: "b"})
+	// The worker takes the first job out of the queue; only then are both queue
+	// slots free, which is the state this test is about.
+	if !d.Submit(Job{ID: "q1", Text: "a"}) {
+		t.Fatal("expected the first submit to be accepted")
+	}
+	<-adapter.started
 
-	// Third should fail
-	ok := d.Submit(Job{ID: "q3", Text: "c"})
-	if ok {
+	if !d.Submit(Job{ID: "q2", Text: "b"}) {
+		t.Fatal("expected the second submit to be accepted")
+	}
+	if !d.Submit(Job{ID: "q3", Text: "c"}) {
+		t.Fatal("expected the third submit to fill the queue")
+	}
+
+	if d.Submit(Job{ID: "q4", Text: "d"}) {
 		t.Error("expected submit to fail when queue is full")
 	}
 }

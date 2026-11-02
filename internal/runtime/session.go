@@ -19,6 +19,7 @@ import (
 	"pancakes-harness/internal/memory"
 	"pancakes-harness/internal/metrics"
 	"pancakes-harness/internal/model"
+	"pancakes-harness/internal/preprocess"
 	"pancakes-harness/internal/replay"
 	"pancakes-harness/internal/tools"
 )
@@ -44,6 +45,10 @@ type Config struct {
 	MemoryManager *memory.Manager
 	AuditConfig   audit.Config
 
+	// Preprocessor enriches ingress out of band. Submit is non-blocking, so a
+	// nil or failing sidecar cannot slow or fail a turn.
+	Preprocessor Preprocessor
+
 	// v0.3.1 Gemini compaction
 	Compactor        compactor.Compactor
 	CompactionSchedule compactor.ScheduleConfig
@@ -67,8 +72,16 @@ type Session struct {
 	compactor compactor.Compactor
 	scheduler *compactor.Scheduler
 
+	preprocessor Preprocessor
+
 	mu      sync.Mutex
 	counter int
+}
+
+// Preprocessor is the ingress enrichment sidecar. It is declared here as the
+// narrow seam the session needs, so the daemon keeps its own lifecycle.
+type Preprocessor interface {
+	Submit(preprocess.Job) bool
 }
 
 type TurnResult struct {
@@ -118,6 +131,7 @@ func StartSession(cfg Config) (*Session, error) {
 		auditConfig:       cfg.AuditConfig,
 		compactor:         cfg.Compactor,
 		scheduler:         sched,
+		preprocessor:      cfg.Preprocessor,
 	}
 
 	events, err := s.backendListEventsBySession(context.Background(), s.id)
@@ -167,6 +181,18 @@ func (s *Session) handleUserTurn(ctx context.Context, branchID, text, externalCo
 	// Index the event in the memory layer (layer 1)
 	if s.memoryManager != nil {
 		s.memoryManager.IndexEvent(userEvent)
+	}
+
+	// Hand the turn to the fast sidecar if one is wired. Submit is non-blocking
+	// and its result is intentionally ignored: enrichment is enrichment.
+	if s.preprocessor != nil {
+		s.preprocessor.Submit(preprocess.Job{
+			ID:        userEvent.ID,
+			SessionID: s.id,
+			BranchID:  branchID,
+			Text:      text,
+			TS:        now,
+		})
 	}
 
 	// Initialize audit tracker for this turn

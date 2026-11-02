@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 
@@ -339,6 +340,9 @@ func (a *Adapter) ListManifests(ctx context.Context, limit, offset int) ([]consu
 			}
 		}
 	}
+	// Pagination is only stable over a deterministic order, and map iteration
+	// is not: without this, page N+1 re-serves records page N already returned.
+	sort.Slice(manifests, func(i, j int) bool { return manifests[i].EventID < manifests[j].EventID })
 
 	if offset < 0 {
 		offset = 0

@@ -98,6 +98,20 @@ CGO_ENABLED=0 go run ./cmd/harness \
   "hello harness"
 ```
 
+### 2b) Local fast sidecar (no API key)
+
+The ingress sidecar runs a 2-bit Needle 3 extraction locally and gates it with
+laya. Install the model once, then serve:
+
+```bash
+python3 -m venv ~/needle-venv && ~/needle-venv/bin/pip install cactus-needle
+HARNESS_BIN=$(nix build .#harness --no-link --print-out-paths)/bin/harness \
+  NEEDLE_PYTHON=~/needle-venv/bin/python scripts/ritual_demo.sh
+```
+
+`HARNESS_PREPROCESS=needle` is the env form of `-preprocess needle`. Details and
+measured behaviour: `HARNESS.md` §9.
+
 ### 3) Ollama + xs backend (one-shot)
 
 ```bash
