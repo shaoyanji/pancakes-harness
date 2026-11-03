@@ -65,6 +65,11 @@ COMMIT_MSGS = [
 ]
 
 
+# Tools whose arguments are emitted as ordered values instead of a keyed object.
+# The order is the contract: values[0] is the first name listed here.
+ORDERED = {"grep": ("pattern", "text")}
+
+
 def compact(tools):
     """Keep the parameter schema, drop the prose.
 
@@ -75,12 +80,27 @@ def compact(tools):
     binds a value to its key - a flatter {name, args} list was tried first and the
     model selected tools correctly while inventing keys like `pattern`, `file_name`
     or `file` in place of `ref` (0.0% exact arguments).
+
+    grep is the exception, and deliberately so. It is the only tool that binds two
+    values to two keys with no reason for either to come first, and it scored 0/37
+    exact across fifteen phrasings while still being named correctly: the adapter
+    fills one field with the whole request and drops the other. An ordered pair
+    leaves it one field to fill, and the position does the binding.
     """
     out = []
     for entry in tools:
         function = entry.get("function", entry)
         properties = function.get("parameters", {}).get("properties", {})
-        out.append({"name": function["name"],
+        name = function["name"]
+        if name in ORDERED:
+            out.append({"name": name, "parameters": {"properties": {"values": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": len(ORDERED[name]),
+                "maxItems": len(ORDERED[name]),
+            }}}})
+            continue
+        out.append({"name": name,
                     "parameters": {"properties": {
                         key: {"type": value.get("type", "string")}
                         for key, value in properties.items()}}})
@@ -163,8 +183,8 @@ def render(split, rng_seed):
 
     def grep():
         pattern, text = pick(patterns), pick(texts)
-        return one(GREP, {"pattern": pattern, "text": text},
-                   f'pattern="{pattern}" and text="{text}" both appear verbatim in the request.',
+        return one(GREP, {"values": [pattern, text]},
+                   f'the request quotes "{pattern}" first and "{text}" second, in that order.',
                    rng.choice(GREP_TEMPLATES[split]).format(pattern=pattern, text=text))
 
     def write():
