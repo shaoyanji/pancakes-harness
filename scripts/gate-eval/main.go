@@ -46,6 +46,7 @@ func main() {
 	root := flag.String("root", ".", "repo root to index")
 	evalPath := flag.String("eval", "scripts/needle-data/eval.pinned.jsonl", "eval rows")
 	predsPath := flag.String("preds", "", "predictions to replay")
+	verbose := flag.Bool("v", false, "print the deciding rule for every refused row")
 	flag.Parse()
 
 	if *predsPath == "" {
@@ -95,6 +96,13 @@ func main() {
 			if target == &answering {
 				lost = append(lost, row.Query)
 			}
+			if *verbose {
+				for _, decision := range decisions {
+					if decision.Verdict == tooling.Abstain {
+						fmt.Printf("  refused: %s | %s | %s\n", decision.Checks[len(decision.Checks)-1].Rule, decision.Reason, row.Query)
+					}
+				}
+			}
 		}
 		if row.Exact {
 			target.exact++
@@ -119,6 +127,9 @@ func main() {
 	fmt.Println()
 
 	fmt.Printf("exact rows preserved: %d of %d\n", answering.preserved, answering.exact)
+	if kept := answering.rows - answering.after; kept > 0 {
+		fmt.Printf("executed precision: %d of %d rows kept (%.1f%%)\n", answering.preserved, kept, 100*float64(answering.preserved)/float64(kept))
+	}
 	if len(lost) > 0 {
 		fmt.Printf("answering rows refused by the gate: %d\n", len(lost))
 		for _, query := range lost {
