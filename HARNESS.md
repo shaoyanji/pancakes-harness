@@ -376,57 +376,90 @@ response, on the bridge's stderr.
 (`glob`, `grep`, `read`, `write`) into a training set, trains a LoRA adapter on a
 12-layer rung of needle3, and scores the base rung and each adapter through the
 `.cact` engine on a held-out split. Measured on a 2-core / 8 GB codespace, CPU
-only, 160 held-out rows of which 152 are callable and 11 need two calls:
+only, 160 held-out rows of which 152 are callable and 11 need two calls. Each
+cell is three passes in fresh processes under one pinned prompt, all three
+identical, plus one pass under each of two further date facts — the pinned number
+is the point, the range is what else a different prompt buys:
 
 | | base rung | 1 epoch | 2 epochs | 3 epochs | 4 epochs |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| correct tool set | 17.1% | 27.0% | 42.1% | 59.2% | **59.9%** |
-| exact arguments | 7.9% | 11.2% | 21.7% | **39.5%** | 38.2% |
-| exact call | 7.9% | 5.3% | 21.1% | **39.5%** | 38.2% |
-| └ single-call rows (n=141) | 8.5% | 5.7% | 22.7% | **42.6%** | 41.1% |
-| └ multi-call: right call count | 2/11 | 7/11 | 11/11 | 9/11 | 8/11 |
-| └ multi-call: right tools | 0/11 | 0/11 | 0/11 | 0/11 | 0/11 |
+| exact call, three prompts | 6–9 | 12–22 | 32–39 | **58–61** | 54–62 |
+| exact call, pinned prompt | 6 | 12 | 32 | **61** | 57 |
+| correct tool set | 15.1% | 28.3% | 46.1% | 59.2% | **63.2%** |
+| exact arguments | 3.9% | 11.2% | 21.7% | **40.1%** | 37.5% |
+| └ `read` (n=56) | 0 | 6 | 19 | 44 | 41 |
+| └ `glob` (n=32) | 6 | 6 | 11 | 17 | 15 |
+| └ `grep` (n=37) | 0 | 0 | 2 | 0 | 0 |
+| └ `write` (n=16) | 0 | 0 | 0 | 0 | 0 |
+| └ multi-call: right call count | 3/11 | 7/11 | 11/11 | 7/11 | 9/11 |
+| └ multi-call: exact | 0/11 | 0/11 | 0/11 | 0/11 | 1/11 |
 | refusals correct (n=8) | 100% | 100% | 100% | **0%** | 0% |
-| parse failures (of 160) | 0 | 0 | 0 | 2 | 0 |
-| latency p50 | 334 ms | 216 ms | 210 ms | 196 ms | 228 ms |
-| trainer's own held-out | — | 5/30 | 17/30 | — | — |
+| parse failures (of 160) | 0 | 0 | 0 | 2 | 1 |
+| latency p50 | 362 ms | 241 ms | 231 ms | 224 ms | 238 ms |
 
 Every column is the same pinned corpus, the same 12-layer rung and the same 160
 rows; only the epoch count (and the cosine schedule that follows it) differs. Val
 losses are **not** comparable across columns (a 4-epoch run decays over 572 steps
 where a 2-epoch run decays over 286), so only the bench rates are read across rows.
 
-Six things the numbers mean, in the order they matter for using this:
+#### How the bench measures
 
-- **One epoch is a trap, and two is under-trained.** At one epoch the tool-choice
-  rate nearly doubles (17.1% → 27.0%) while *exact* calls fall below the base rung
-  (7.9% → 5.3%). The adapter has learned to answer but not yet to copy, and it now
-  attempts rows the base rung declined, so its precision drops on a denominator
-  that grew. Judged on exact calls only, the 1-epoch adapter is worse than no
-  adapter at all — which is why an accuracy number read at one epoch is not a
-  result. Two epochs looked like the answer here until three were run: 21.1% →
-  39.5% exact calls, nearly doubling again on the same data.
-- **The bench samples, and that band is wider than the epoch 3 → 4 gap.**
-  Re-benchmarking the *same* 3-epoch weights gives 60/152 (39.5%) and 53/152
-  (34.9%) exact, with 26 of 160 predictions differing between the two runs; the
-  `.cact` engine's decoding is not pinned and neither `Needle.__init__` nor
-  `complete` exposes a temperature to pin it. A single run therefore cannot rank
-  two adapters a few points apart, and epoch 4's 38.2% against epoch 3's 39.5% is
-  inside the band. Only three things survived a repeat: the base rung is far below
-  every adapter (7.9% and 3.9% on two runs), one epoch is far below two (5.3%
-  against ≈35%), and `grep` (0/37) and `write` (0/16) never improve in any run of
-  any corpus. Read the shape of this table, not its decimal.
-- **The loss curve stops tracking the task at three epochs.** Epoch 4 buys 0.7 pp
+Two things vary a bench run, and the bench now separates them. The engine is greedy,
+and inside one process it is exactly repeatable: the same 160 rows asked twice in one
+process come back 160/160 identical. The C API is
+`needle_complete(text, audio, audio_len, max_new_tokens, buffer, len)` — no seed, no
+temperature, and the shared object exports nothing that sets one, so there is no
+decoding knob to pin. (The JAX reference decoder in `needle.model.run` does have
+`--seed` and `--temperature`, and re-runs the whole prefix per token: 16–26 s a row
+here, which is why the engine is the benchmark.)
+
+What made two runs of the *same* archive disagree was the prompt. `Needle.__init__`
+prefixes the system prompt with `date: %Y-%m-%d %a %H:%M`, so two interpreters
+started minutes apart send different prompts; on the 3-epoch archive that moved 26
+of 160 rows and 7 exact calls, and the base rung scored 12/152 under a live clock
+against 6/152 with the fact pinned — a swing as large as the 2 → 3 epoch effect it
+would have been used to measure. `scripts/needle_bench.py` therefore sends
+`date: 2026-01-01 Thu 00:00` (the engine keeps any prompt that already names a
+`date:`), records the prompt in its report, and runs `--repeats` passes in fresh
+child processes, so any variation that survives the pin has to appear as a range
+instead of as a silent difference between two runs a day apart.
+`scripts/needle_noise_probe.py` is the probe behind those three claims: same rows
+twice in one process, once in a second process, and the digest that tells them
+apart.
+
+Pinning makes a run repeatable, not representative: the date fact is part of the
+prompt, and one fixed prompt is one sample of it. So every headline number is also
+run under `2026-06-15 Mon 12:00` and `2025-12-31 Wed 23:59`, and quoted as the range
+over the three. That band is not small — up to ten rows of 152 — so the rule for
+reading the tables below is that a difference smaller than the band is not a
+result, however many passes produced it.
+
+Nine things the numbers mean, in the order they matter for using this:
+
+- **The base rung and one epoch cannot be ranked, and both are far below two.**
+  In this three-prompt set epoch 1 (12–22) sits above the base rung (6–9); the
+  earlier live-clock run had them the other way round (12 against 8). Four
+  prompts, two orders — the pair is not ranked by this bench. Both are far below
+  two epochs (32–39), and what the first epoch buys is tool choice without
+  arguments: 28.3% right tools against 11.2% exact arguments.
+- **Three and four epochs are a tie, and the gap to two is the result.** Epoch 3
+  runs 58–61 and epoch 4 runs 54–62: overlapping, so neither ranks the other, and
+  the pinned prompt's 61-against-57 is one point inside that overlap. The better
+  call chooser (epoch 4, 63.2% tool set) is the worse argument copier, which is
+  consistent with the loss curve below. The row that survives every prompt is
+  2 → 3: 32–39 to 58–61, no overlap, the only epoch step that is a result.
+- **The loss curve stops tracking the task at three epochs.** Epoch 4 buys 4.0 pp
   of tool choice and the trainer's val loss keeps falling (0.0741 → 0.0704) while
-  training loss reaches 0.0196 — memorisation of 600 rows, not better binding.
-  Three epochs is also where the corpus stops teaching extraction and starts
-  teaching "always emit a call" (see the refusal row).
+  training loss reaches 0.0196 — memorisation of 600 rows, not better binding:
+  exact calls do not improve (58–61 against 54–62). Three epochs is also where the
+  corpus stops teaching extraction and starts teaching "always emit a call" (see
+  the refusal row).
 - **The third epoch costs every refusal.** Refusals go 100% → 0% between two and
   three epochs: all eight out-of-scope rows ("what should I have for dinner",
   "summarise the history of the Byzantine empire") come back as a confident
   `grep` or `read`. Those rows are 8 of 600 training examples, and at three passes
   the adapter has fitted the far more common "answer with a call" pattern
-  instead. So the 39.5% is bought with the calibration that made §9's `uncertain`
+  instead. So the 40.1% is bought with the calibration that made §9's `uncertain`
   flag meaningful — a caller checking `abstain_rate` must not use this adapter
   alone as its gate.
 - **The stock model does not answer a command-style request at all.** Asked to
@@ -440,29 +473,33 @@ Six things the numbers mean, in the order they matter for using this:
   invented `pattern` / `file_name` / `file` in its place. With
   `parameters.properties` kept, the 2-epoch adapter invents **zero** unknown keys
   across all 152 callable rows: it now always speaks the schema's vocabulary.
-  What it still gets wrong is the value. At three epochs 92 of the 152 callable
-  rows are wrong, and the five largest classes say the residue is lexical, not
-  semantic:
+  What it still gets wrong is the value. At three epochs 91 of the 152 callable
+  rows are wrong (80 single-call, 11 multi-call), and the largest classes say the
+  residue is lexical, not semantic:
 
   | failure at 3 epochs | n | example |
   | :--- | ---: | :--- |
-  | right tool, no arguments | 9 | `fetch the file internal/server/server.go` → `read` with `{}` |
-  | `grep` → `glob` | 19 | `locate vendorHash inside "…"` → `glob` |
-  | `glob`, `/*.go` dropped | 10 | `what .go files live in internal/memory` → `pattern: internal/memory` |
-  | `write` → `grep` / `read` | 16 | `create X containing Y` → `grep` with the content as pattern |
-  | `grep`, `pattern`/`text` swapped | 3 | `search "A" for B` → `pattern: A, text: B` |
+  | `grep` → `glob` | 18 | `locate vendorHash inside "…"` → `glob` |
+  | `glob`, wrong value | 13 | `what .go files live in internal/memory` → `pattern: internal/memory` |
+  | `grep`, wrong value | 12 | both values copied, one from the wrong span |
+  | `write` → `grep` | 9 | `create X containing Y` → `grep` with the content as pattern |
+  | right tool, no arguments | 9 | `fetch the file internal/server/server.go` → `read`, `{}` |
+  | `write` → `read` | 7 | `put "…" into run-demo.sh` → `read run-demo.sh` |
+  | `grep` → `read` | 6 | `search "…" for vendorHash` → `read` |
+  | `read` → `glob` | 3 | the file named as a glob |
+  | multi-call, wrong pairing | 11 | a `read`+`glob` request answered `glob`+`write` |
 
-  The `grep` → `glob` class alone is 19 of those 92 failures: "locate X inside Y"
+  The `grep` → `glob` class alone is 18 of those 91 failures: "locate X inside Y"
   is a text-scoped search, and the adapter reads "locate X" as a filename guess.
   That and the `*.go` collapse look mechanical enough that a post-processor
   (expand a bare `internal/X` to `internal/X/*.go`, un-swap `pattern`/`text`)
-  appears to move the same adapter from 39.5% to 46.7% without retraining. **It
+  appears to move the same adapter up several points without retraining. **It
   does not, and that number must not be quoted.** `scripts/needle_rituals.py`
   gives every verb family a disjoint `train` and `eval` rendering list, so *all
   160 eval rows are phrasings the corpus never shows*, and those three rules are
   keyed to the eval renderings themselves (`locate … inside`, `what .go files
   live in …`). A resolver written from these failures is a hand-labeller for the
-  test set. The honest reading is therefore the opposite of a win: 39.5% exact on
+  test set. The honest reading is therefore the opposite of a win: 40.1% exact on
   fully held-out paraphrases is a *paraphrase-generalization* result, and the
   large failure classes are exactly the families whose eval rendering shares the
   least vocabulary with its train rendering (`grep`: "find X in the text" /
@@ -485,10 +522,11 @@ Six things the numbers mean, in the order they matter for using this:
 - **Multi-call structure is learned, pairing is not — and it degrades past two
   epochs.** Every gold multi-call row is `read` + `glob`, and the 2-epoch adapter
   emits exactly two calls 11/11 times — but never that pair (it proposes
-  `read`+`write`, `grep`+`write`, …). At three and four epochs the count slips
-  (9/11, 8/11) and two rows are truncated mid-call at the token budget, while the
-  pairing is still 0/11. The count is a shape it can infer; which tools go
-  together is a relation, and 42 multi-call training rows do not carry it.
+  `read`+`write`, `grep`+`write`, …). At three epochs the count slips to 7/11 —
+  two rows are cut off mid-call at the token budget — and four epochs recovers
+  9/11 with the first exact multi-call row; the pairing is still 1/11. The count
+  is a shape it can infer; which tools go together is a relation, and 42
+  multi-call training rows do not carry it.
 - **Depth is a memory wall, not a quality choice.** A 20-layer training compile
   needs about 4.5 GB and is killed on this runner (SIGTERM, ~4.5 GB RSS); 12
   layers peaks at 3.9 GB. Every column is the same rung, so the delta is only the
@@ -498,32 +536,74 @@ Six things the numbers mean, in the order they matter for using this:
 
 #### Grep does not need more ways to say it
 
-`grep` carried the largest failure class (19 of 92) and had the fewest train
+`grep` carried the largest failure class (18 of 91) and had the fewest train
 renderings — two, against `read`'s four. Widening only `GREP_TEMPLATES["train"]`
-from 2 to 15 renderings, leaving the eval list and all 160 rows byte-identical,
-retrained at three epochs, and benched twice per corpus because one run is not a
-measurement:
+from 2 to 15 renderings, leaving the eval queries and gold calls identical,
+retrained at three epochs, and benched three passes per corpus:
 
-| corpus | run | exact | tool set | `read` | `glob` | `grep` | `write` |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2 grep renderings | 1 | 60/152 (39.5%) | 59.2% | 43/67 | 17/32 | 0/37 | 0/16 |
-| | 2 | 53/152 (34.9%) | 54.6% | 39/67 | 14/32 | 0/37 | 0/16 |
-| 15 grep renderings | 1 | 49/152 (32.2%) | 52.0% | 32/67 | 17/32 | 0/37 | 0/16 |
-| | 2 | 51/152 (33.6%) | 54.6% | 34/67 | 17/32 | 0/37 | 0/16 |
+| corpus | exact (three prompts) | exact (pinned) | `read` | `glob` | `grep` | `write` |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 grep renderings | 58–61 | **61/152** | 44/56 | 17/32 | 0/37 | 0/16 |
+| 15 grep renderings | 50–61 | 50/152 | 33/56 | 17/32 | 0/37 | 0/16 |
 
-`grep` exact is **0/37 in all four runs**. The adapter does name `grep` on those
-rows — 10–12 of the 37 — and never once supplies both `pattern` and `text`
-correctly. Fifteen ways of asking moved it by zero rows, so the wall is not
-vocabulary: `grep` is the only tool whose answer is two coupled fields, and the
-other three are a single copied value. What did move is `read`, from 39–43 down to
-32–34 — about five points, outside the sampling band. At a fixed 600 rows, more
-grep phrasings have to come out of repetitions per phrasing everywhere else.
+`grep` exact is **0/37 on both corpora**, in every pass at every prompt. The adapter
+does name `grep` on those rows — 8 to 10 of the 37 — and never once supplies both
+`pattern` and `text` correctly. Fifteen ways of asking moved it by zero rows, so the
+wall is not vocabulary.
 
-So the corpus is volume-limited, not phrasing-limited. `grep` is 138 of 600
-training rows against 37 of 152 eval rows, and it is at zero for a structural
-reason: two generated fields with a stated order. The two families stuck at 0 are
-the two that need something other than gradient signal — `grep` a format where
-both fields are not free-form (or a verb table), `write` a router.
+The aggregate is a different story, and it is the reason this section reports ranges:
+the widened corpus is eleven rows down at the pinned prompt (50 against 61) and ten
+rows **up** under a different date fact (61 against 58). Its band is 50–61, wider
+than any effect it was meant to measure, so "a wider corpus costs `read` accuracy"
+— the pinned run's story, `read` 44/56 → 33/56 — is not established either. At a fixed
+600 rows an extra `grep` phrasing is bought by repeating the others less, but that
+trade is smaller than the prompt's own effect on a 12-layer model.
+
+So the corpus is not phrasing-limited. Whether it is volume-limited cannot be read
+from these aggregates either: at 600 rows, more phrasings per family is bought by
+fewer repetitions elsewhere, and that trade is inside the prompt band. What *is*
+settled is grep's zero — 138 of 600 training rows, 37 of 152 eval rows, 0 exact in
+seven trained adapters across three prompts. It is the only tool whose answer is two
+coupled fields rather than one copied value, so the next thing to test was the
+binding itself, not the vocabulary.
+
+#### The ordered pair does not fix grep either
+
+If a keyed pair is the problem, an ordered one should help: declare grep with a
+single `values` array (`minItems: 2`, `maxItems: 2`), let position carry the
+binding, and map it back to `pattern`/`text` at the edge (`needle_bench.bind`).
+Only `compact()` and grep's gold arguments changed — the 160 queries, the other
+three schemas and the 600-row volume are identical — then 3 epochs, rank 16,
+batch 4 as before:
+
+| grep schema | exact (three prompts) | exact (pinned) | `read` | `glob` | `grep` | refusals (n=8) | multi right count |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| keyed pair | 50–61 | 50/152 | 33/56 | 17/32 | 0/37 | 0–2/8 | 7/11 |
+| ordered pair | **54–56** | 56/152 | 44/56 | 12/32 | 0/37 | **6/8** | 10/11 |
+
+grep is 0/37 again, and this adapter barely attempts it: it names grep on 5 of the
+37 rows, down from 10, and answers "locate X inside Y" with `read` whose `ref` is
+the quoted span, or a `glob` whose pattern is "X inside". The two keys were never
+the obstacle — given one field to fill, the model stops choosing the tool. The
+reading that survives is that grep's two values must be *selected from two places in
+the request*, which 138 examples do not teach.
+
+Three other things moved, and the band keeps two of them honest:
+
+- **`read` and the call count.** 33 → 44 and 7 → 10 at the pinned prompt, but the
+  aggregate bands (50–61 against 54–56) overlap, so neither is a result.
+- **Stability.** The ordered adapter's band is 54–56 against the keyed one's
+  50–61. Two extra prompts is not enough to call that a smaller variance; it is an
+  observation, and the reason the next comparison should run more prompts before
+  more epochs.
+- **Abstention, which is a result.** 6 of 8 out-of-scope rows are declined at every
+  prompt, against 2, 0 and 0 of 8 for the keyed 3-epoch archives. Bands that do not
+  touch are the only kind this bench can claim, and this is the first adapter to
+  decline anything without the gate.
+
+Nothing here suggests another training run reaches grep. The deterministic route
+stays what §9 already does: a verb table for the two-value verbs, and
+`request_supported` in the gate for the rest.
 
 #### Abstention belongs in code, not in the weights
 
@@ -547,20 +627,24 @@ than the proposal restores 8/8 at every epoch:
 
 | adapter | out-of-scope abstained | answering rows refused | exact calls preserved | executed precision |
 | :--- | ---: | ---: | ---: | ---: |
-| base rung | 8/8 | 87/152 | 12/12 | 18.5% |
-| 1 epoch | 8/8 | 121/152 | 8/8 | 25.8% |
-| 2 epochs | 8/8 | 64/152 | 32/32 | 36.4% |
-| 3 epochs | 0/8 → **8/8** | 32/152 | 60/60 | **50.0%** |
-| 4 epochs | 0/8 → **8/8** | 27/152 | 58/58 | 46.4% |
+| base rung | 8/8 | 90/152 | 6/6 | 9.7% |
+| 1 epoch | 8/8 | 108/152 | 12/12 | 27.3% |
+| 2 epochs | 8/8 | 66/152 | 32/32 | 37.2% |
+| 3 epochs | 0/8 → **8/8** | 27/152 | 61/61 | **48.8%** |
+| 4 epochs | 0/8 → **8/8** | 32/152 | 57/57 | 47.5% |
 
 The gate never improves accuracy, and must not: a gate that rewrites a wrong call
 into a right one is a second model with the same failure mode. What it changes is
-which rows get answered at all. All 32 rows it refuses at three epochs carry an
+which rows get answered at all. All 27 rows it refuses at three epochs carry an
 uncallable call — a missing `ref` or `text`, an invented key, a path that does not
 exist — so *executed precision* (exact calls over calls that actually ran) is the
-honest operational number: 50.0%, against 39.5% of every row.
+honest operational number: 48.8%, against 40.1% of every row.
 
-Two costs are built in. Thirty-two of 152 answerable requests go unanswered rather
+The replay is the pinned-prompt predictions. The four per-call rules could move a
+row or two with the prompt, since they judge what the adapter proposed; the fifth
+reads the request, and the 8/8 it restores is the same 8/8 at any prompt.
+
+Two costs are built in. Twenty-seven of 152 answerable requests go unanswered rather
 than answered wrongly, and rule 5 needs the request to quote its text span or name
 a path, so an unquoted paste with no path is refused. Both are the right trade only
 if the caller can escalate to a model that sees more.
@@ -573,16 +657,19 @@ pinned rows, native function calling on the hosted side:
 
 | | needle 3-epoch | gpt-oss-120b (Groq) |
 | :--- | ---: | ---: |
-| exact call | 39.5% | **52.0%** |
+| exact call | 40.1% | **52.0%** |
 | correct tool set | 59.2% | **71.1%** |
 | refusals correct | 0/8 | **8/8** |
 | semantic payload per row | 403 B | 403 B |
 | prompt tokens per row | engine reports none | 175 |
 | output tokens per row | ≤192 cap | 96 |
-| latency p50 | **196 ms** | 2,484 ms |
-| bytes per exact call | **1,075 B** | 1,632 B |
+| latency p50 | **224 ms** | 2,484 ms |
+| bytes per exact call | **1,057 B** | 1,632 B |
 | tokens per exact call | — | 546 |
-| wall time per exact call | **594 ms** | 4,406 ms |
+| wall time per exact call | **674 ms** | 4,406 ms |
+
+The adapter's exact count moves 58–61 across the three prompts, so its derived
+per-call costs move by about ±3%; the hosted column is one temperature-0 run.
 
 `semantic payload` is the same measure on both sides — serialized tool schemas plus
 query — because that is the part the harness controls. The hosted HTTP body is 806
@@ -590,8 +677,8 @@ bytes with its JSON envelopes and tool wrappers, and that is what its
 bytes-per-exact-call uses. One of the 160 hosted rows returned arguments that were
 not JSON at all; it is counted as a miss, not dropped.
 
-Read plainly: the adapter is **7.4× faster per correct call and 1.5× cheaper in
-bytes**, while being 12.5 points less accurate and never declining. The hosted
+Read plainly: the adapter is **6.5× faster per correct call and 1.5× cheaper in
+bytes**, while being 11.9 points less accurate and never declining. The hosted
 model pays 4.4 s and 546 tokens for the same call. So the sidecar's case is latency
 and local execution, not byte efficiency — 1.5× does not carry the accuracy loss by
 itself, which is why the gate and the verb table are part of the design rather than
@@ -628,7 +715,7 @@ virtualenv -p python3.12 .venv-train
 The tuned archive is a tool caller, not an extraction model: point
 `NEEDLE_WEIGHTS` at it for a tool-calling workload, and leave §9's sidecar on the
 published weights, which are what the `Extraction` schema was trained against.
-35–40% exact calls at ~200 ms is a router that still needs a table around it:
+38–40% exact calls at ~225 ms is a router that still needs a table around it:
 run every call through `internal/tooling.Gate` (schema, grounding, resolution) and
 keep `write` and any two-call ritual behind a deterministic resolver. Its own
 abstention is not a gate — the 3-epoch adapter never declines, which is why the
