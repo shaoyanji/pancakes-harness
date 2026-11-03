@@ -11,6 +11,13 @@ train after a file is added.
 
 Writes {split}.jsonl in the format needle finetune reads: one object per line
 with query, reasoning, answers and tools.
+
+The split is doubly held out. Values (paths, patterns, texts, commit lines) are
+split by sha1 as described, and every verb family keeps two disjoint template
+lists below, so the eval rows are renderings the corpus never shows. That is the
+point of the experiment: it scores paraphrase generalization, not recall of a
+sentence. Editing a family's "train" list is fair game; editing an "eval" list
+invalidates every number reported against it.
 """
 
 import argparse
@@ -201,7 +208,20 @@ GLOB_TEMPLATES = {
 
 GREP_TEMPLATES = {
     "train": ["find {pattern} in the text \"{text}\"",
-              "where does {pattern} appear in \"{text}\""],
+              "where does {pattern} appear in \"{text}\"",
+              "does \"{text}\" mention {pattern}",
+              "which line of \"{text}\" contains {pattern}",
+              "is {pattern} present in \"{text}\"",
+              "in \"{text}\", is there any mention of {pattern}",
+              "check whether \"{text}\" says {pattern}",
+              "quote the line in \"{text}\" that has {pattern}",
+              "every occurrence of {pattern} in \"{text}\", one per line",
+              "scan \"{text}\" and point out {pattern}",
+              "count the occurrences of {pattern} in \"{text}\"",
+              "what context surrounds {pattern} in \"{text}\"",
+              "look at \"{text}\" and tell me if {pattern} turns up",
+              "highlight {pattern} wherever it occurs in \"{text}\"",
+              "does {pattern} show up anywhere in \"{text}\""],
     "eval": ["locate {pattern} inside \"{text}\"", "search \"{text}\" for {pattern}"],
 }
 
