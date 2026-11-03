@@ -19,6 +19,7 @@ func testGate() *Gate {
 		files: map[string]bool{
 			"internal/server/server.go":     true,
 			"internal/preprocess/needle.go": true,
+			"run-demo.sh":                   true,
 		},
 		dirs: map[string]bool{"": true, "internal": true, "internal/server": true,
 			"internal/preprocess": true},
@@ -132,6 +133,7 @@ func TestFits(t *testing.T) {
 		want  bool
 	}{
 		{"open internal/server/server.go", true},
+		{"cat the contents of run-demo.sh", true},
 		{"give me every file matching internal/preprocess/*.go", true},
 		{`search "the vendor hash is pinned" for vendorHash`, true},
 		{"what should I have for dinner tonight?", false},

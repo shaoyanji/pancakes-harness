@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	ErrToolNotFound   = errors.New("tool not found")
-	ErrToolNotReady   = errors.New("tool not ready")
+	ErrToolNotFound    = errors.New("tool not found")
+	ErrToolNotReady    = errors.New("tool not ready")
 	ErrWriteInParallel = errors.New("write tools cannot run in parallel")
 )
 
@@ -33,10 +33,10 @@ const (
 
 // Tool is a structured, typed tool definition.
 type Tool struct {
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Type        ToolType  `json:"type"`
-	Schema      ToolSchema `json:"schema"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Type        ToolType    `json:"type"`
+	Schema      ToolSchema  `json:"schema"`
 	Handler     ToolHandler `json:"-"`
 }
 

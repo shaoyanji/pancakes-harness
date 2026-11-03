@@ -189,8 +189,9 @@ func (g *Gate) Fits(query string) bool {
 		return true
 	}
 	for _, token := range strings.Fields(query) {
+		// A root-level file carries no slash, so every token is asked.
 		token = strings.Trim(token, "\"'`,;:()[]{}.?!")
-		if token == "" || !strings.Contains(token, "/") {
+		if token == "" {
 			continue
 		}
 		if g.index.HasPath(token) || g.index.HasDir(token) {
