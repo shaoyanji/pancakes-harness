@@ -447,18 +447,34 @@ Six things the numbers mean, in the order they matter for using this:
 
   The `grep` → `glob` class alone is 19 of those 92 failures: "locate X inside Y"
   is a text-scoped search, and the adapter reads "locate X" as a filename guess.
-  That and the `*.go` collapse are mechanical — expanding a bare `internal/X` to
-  `internal/X/*.go` and un-swapping `pattern`/`text` as post-processing moves the
-  same adapter from 39.5% to **46.7%** exact calls without retraining, which is a
-  larger gain than epoch 4 produced. The remaining 35 are binding errors on the
-  harder half of the phrasings.
+  That and the `*.go` collapse look mechanical enough that a post-processor
+  (expand a bare `internal/X` to `internal/X/*.go`, un-swap `pattern`/`text`)
+  appears to move the same adapter from 39.5% to 46.7% without retraining. **It
+  does not, and that number must not be quoted.** `scripts/needle_rituals.py`
+  gives every verb family a disjoint `train` and `eval` rendering list, so *all
+  160 eval rows are phrasings the corpus never shows*, and those three rules are
+  keyed to the eval renderings themselves (`locate … inside`, `what .go files
+  live in …`). A resolver written from these failures is a hand-labeller for the
+  test set. The honest reading is therefore the opposite of a win: 39.5% exact on
+  fully held-out paraphrases is a *paraphrase-generalization* result, and the
+  large failure classes are exactly the families whose eval rendering shares the
+  least vocabulary with its train rendering (`grep`: "find X in the text" /
+  "where does X appear in" → "locate X inside"; `glob`: "list {pattern}" → "what
+  .go files live in {dir}"). The lever is rendering diversity in the corpus,
+  not post-processing in front of the model. The same holdout explains the
+  refusal collapse: train's three out-of-scope strings and eval's three are
+  disjoint, so 30 of 600 rows could not survive three passes.
 - **`write` is not reachable from the model.** 16 `write` rows, **0 exact at every
   epoch**. It comes back as `grep` with the content string as the pattern, or as
   `read`. Four epochs do start naming the tool (6/16 rows mention `write`, up from
   1) but only as a second call after a `read` of the same file, and never with the
   `ref` + `content` pair the schema wants — the phrasings ("create X containing
-  Y", "put Y into X") read like a search with a quoted needle. Route writes
-  deterministically; do not try to tune this away with the current corpus.
+  Y", "put Y into X") read like a search with a quoted needle. Two causes stack
+  here: those are held-out renderings too (train gets "write \"…\" to {path}" /
+  "save \"…\" at {path}"), and the row asks the model to copy a content string
+  into an argument, which is the one thing 60 of 600 rows cannot teach. Route
+  writes deterministically; do not try to tune this away with the current
+  corpus.
 - **Multi-call structure is learned, pairing is not — and it degrades past two
   epochs.** Every gold multi-call row is `read` + `glob`, and the 2-epoch adapter
   emits exactly two calls 11/11 times — but never that pair (it proposes
