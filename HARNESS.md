@@ -489,6 +489,79 @@ Six things the numbers mean, in the order they matter for using this:
   run in ≈41 min, 572 steps (4 epochs) in ≈79 min, and the build plus a bench
   adds ≈6 min.
 
+#### Abstention belongs in code, not in the weights
+
+An adapter that answers every request is unsafe to wire to a tool loop: at three
+epochs all eight out-of-scope rows come back as a confident `read` or `grep`, and
+a caller has no way to tell them from the 152 usable ones. `internal/tooling.Gate`
+decides before anything executes, one rule per question:
+
+| rule | question |
+| :--- | :--- |
+| `tool_exists` | is the name in the registry |
+| `schema` | do the argument keys equal the declared inputs |
+| `grounding` | does every value appear verbatim in the request |
+| `resolution` | does a path-shaped value name a real file, parent directory or directory |
+| `request_supported` | does the request name a path, a directory or a quoted span at all |
+
+The last rule is the one fine-tuning forces. At epoch 4 the per-call rules caught
+only 2 of the 8 out-of-scope rows, because the adapter emits *schema-valid* `grep`
+calls whose arguments it copied out of the question. Screening the request rather
+than the proposal restores 8/8 at every epoch:
+
+| adapter | out-of-scope abstained | answering rows refused | exact calls preserved | executed precision |
+| :--- | ---: | ---: | ---: | ---: |
+| base rung | 8/8 | 87/152 | 12/12 | 18.5% |
+| 1 epoch | 8/8 | 121/152 | 8/8 | 25.8% |
+| 2 epochs | 8/8 | 64/152 | 32/32 | 36.4% |
+| 3 epochs | 0/8 → **8/8** | 32/152 | 60/60 | **50.0%** |
+| 4 epochs | 0/8 → **8/8** | 27/152 | 58/58 | 46.4% |
+
+The gate never improves accuracy, and must not: a gate that rewrites a wrong call
+into a right one is a second model with the same failure mode. What it changes is
+which rows get answered at all. All 32 rows it refuses at three epochs carry an
+uncallable call — a missing `ref` or `text`, an invented key, a path that does not
+exist — so *executed precision* (exact calls over calls that actually ran) is the
+honest operational number: 50.0%, against 39.5% of every row.
+
+Two costs are built in. Thirty-two of 152 answerable requests go unanswered rather
+than answered wrongly, and rule 5 needs the request to quote its text span or name
+a path, so an unquoted paste with no path is refused. Both are the right trade only
+if the caller can escalate to a model that sees more.
+
+#### What one successful call costs
+
+The premise of the sidecar is intelligence per byte, so the number that decides
+whether it is worth wiring in is accuracy per unit of work, not accuracy. Same 160
+pinned rows, native function calling on the hosted side:
+
+| | needle 3-epoch | gpt-oss-120b (Groq) |
+| :--- | ---: | ---: |
+| exact call | 39.5% | **52.0%** |
+| correct tool set | 59.2% | **71.1%** |
+| refusals correct | 0/8 | **8/8** |
+| semantic payload per row | 403 B | 403 B |
+| prompt tokens per row | engine reports none | 175 |
+| output tokens per row | ≤192 cap | 96 |
+| latency p50 | **196 ms** | 2,484 ms |
+| bytes per exact call | **1,075 B** | 1,632 B |
+| tokens per exact call | — | 546 |
+| wall time per exact call | **594 ms** | 4,406 ms |
+
+`semantic payload` is the same measure on both sides — serialized tool schemas plus
+query — because that is the part the harness controls. The hosted HTTP body is 806
+bytes with its JSON envelopes and tool wrappers, and that is what its
+bytes-per-exact-call uses. One of the 160 hosted rows returned arguments that were
+not JSON at all; it is counted as a miss, not dropped.
+
+Read plainly: the adapter is **7.4× faster per correct call and 1.5× cheaper in
+bytes**, while being 12.5 points less accurate and never declining. The hosted
+model pays 4.4 s and 546 tokens for the same call. So the sidecar's case is latency
+and local execution, not byte efficiency — 1.5× does not carry the accuracy loss by
+itself, which is why the gate and the verb table are part of the design rather than
+polish. One run, one hosted model, temperature 0, and no shared tokenizer; the
+counts on the two sides are not the same quantity.
+
 The tool schemas are dumped from the Go registry rather than hand-written, so the
 dataset cannot drift from the code it describes:
 
