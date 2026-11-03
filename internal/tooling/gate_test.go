@@ -126,6 +126,42 @@ func TestGateRules(t *testing.T) {
 	}
 }
 
+func TestFits(t *testing.T) {
+	cases := []struct {
+		query string
+		want  bool
+	}{
+		{"open internal/server/server.go", true},
+		{"give me every file matching internal/preprocess/*.go", true},
+		{`search "the vendor hash is pinned" for vendorHash`, true},
+		{"what should I have for dinner tonight?", false},
+		{"summarise the history of the Byzantine empire.", false},
+		{"tell me a joke about compilers.", false},
+		{"open internal/nope/missing.go", false},
+	}
+
+	gate := testGate()
+	for _, test := range cases {
+		if got := gate.Fits(test.query); got != test.want {
+			t.Errorf("Fits(%q) = %v, want %v", test.query, got, test.want)
+		}
+	}
+}
+
+func TestCheckAllAbstainsOutsideTheToolSet(t *testing.T) {
+	gate := testGate()
+	kept, decisions := gate.CheckAll("what should I have for dinner tonight?", []Call{
+		{Name: "grep", Args: map[string]any{"pattern": "dinner", "text": "dinner tonight"}},
+	})
+
+	if len(kept) != 0 {
+		t.Fatalf("kept = %+v, want nothing", kept)
+	}
+	if len(decisions) != 1 || decisions[0].Checks[0].Rule != "request_supported" {
+		t.Fatalf("decisions = %+v, want one request_supported refusal", decisions)
+	}
+}
+
 func TestCheckAllKeepsTheSurvivingCall(t *testing.T) {
 	gate := testGate()
 	query := `read internal/server/server.go and then list internal/server/*.go`

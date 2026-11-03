@@ -141,7 +141,29 @@ func (g *Gate) Check(query string, call Call) Decision {
 
 // CheckAll keeps every call that passes and reports whether anything survived.
 // One refused call out of a pair must not discard the pair.
+//
+// It first asks whether the request is in reach of the tool set at all (Fits).
+// A schema-valid call to an out-of-scope request is the failure mode the gate
+// exists for: the model answers "what should I have for dinner" with a confident
+// grep once it has been fine-tuned to always emit a call.
 func (g *Gate) CheckAll(query string, calls []Call) (kept []Call, decisions []Decision) {
+	if !g.Fits(query) {
+		for _, call := range calls {
+			decisions = append(decisions, Decision{
+				Verdict: Abstain,
+				Reason:  "the request names nothing this tool set can act on",
+				Call:    call,
+				Checks:  []Check{{Rule: "request_supported"}},
+			})
+		}
+		if len(calls) == 0 {
+			decisions = append(decisions, Decision{Verdict: Abstain,
+				Reason: "the request names nothing this tool set can act on",
+				Checks: []Check{{Rule: "request_supported"}}})
+		}
+		return nil, decisions
+	}
+
 	for _, call := range calls {
 		decision := g.Check(query, call)
 		decisions = append(decisions, decision)
@@ -150,6 +172,52 @@ func (g *Gate) CheckAll(query string, calls []Call) (kept []Call, decisions []De
 		}
 	}
 	return kept, decisions
+}
+
+// Fits reports whether the request names something one of these tools can act on:
+// an existing path or directory (read, write, glob) or a quoted span to search
+// (grep). Every tool in the registry consumes a filesystem reference or a literal
+// string, so a request carrying neither is outside all of them — the question is
+// about the request, not about what the model proposed.
+func (g *Gate) Fits(query string) bool {
+	for _, span := range quotedSpans(query) {
+		if len(strings.TrimSpace(span)) >= 2 {
+			return true
+		}
+	}
+	if g.index == nil {
+		return true
+	}
+	for _, token := range strings.Fields(query) {
+		token = strings.Trim(token, "\"'`,;:()[]{}.?!")
+		if token == "" || !strings.Contains(token, "/") {
+			continue
+		}
+		if g.index.HasPath(token) || g.index.HasDir(token) {
+			return true
+		}
+		if dir := path.Dir(token); dir != "." && g.index.HasDir(dir) {
+			return true
+		}
+	}
+	return false
+}
+
+func quotedSpans(query string) []string {
+	var spans []string
+	for {
+		start := strings.IndexByte(query, '"')
+		if start < 0 {
+			return spans
+		}
+		rest := query[start+1:]
+		end := strings.IndexByte(rest, '"')
+		if end < 0 {
+			return spans
+		}
+		spans = append(spans, rest[:end])
+		query = rest[end+1:]
+	}
 }
 
 func (g *Gate) keyMismatch(declared []string, args map[string]any) string {
