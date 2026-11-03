@@ -406,14 +406,21 @@ Six things the numbers mean, in the order they matter for using this:
   adapter at all — which is why an accuracy number read at one epoch is not a
   result. Two epochs looked like the answer here until three were run: 21.1% →
   39.5% exact calls, nearly doubling again on the same data.
-- **Argument binding peaks at three epochs and then stops.** Epoch 4 buys 0.7 pp
-  of tool choice (59.2% → 59.9%) and loses 1.3 pp of exact calls (39.5% → 38.2%,
-  two rows — inside noise), while the trainer's val loss keeps falling (0.0741 →
-  0.0704) and its training loss reaches 0.0196. The loss curve has stopped
-  tracking the task: it is memorising the training set, not binding better. On
-  this corpus and phrase set the ceiling is ≈40% exact calls, reached at epoch 3.
-  Three epochs is also the point where the corpus stops teaching extraction and
-  starts teaching "always emit a call" (see the refusal row).
+- **The bench samples, and that band is wider than the epoch 3 → 4 gap.**
+  Re-benchmarking the *same* 3-epoch weights gives 60/152 (39.5%) and 53/152
+  (34.9%) exact, with 26 of 160 predictions differing between the two runs; the
+  `.cact` engine's decoding is not pinned and neither `Needle.__init__` nor
+  `complete` exposes a temperature to pin it. A single run therefore cannot rank
+  two adapters a few points apart, and epoch 4's 38.2% against epoch 3's 39.5% is
+  inside the band. Only three things survived a repeat: the base rung is far below
+  every adapter (7.9% and 3.9% on two runs), one epoch is far below two (5.3%
+  against ≈35%), and `grep` (0/37) and `write` (0/16) never improve in any run of
+  any corpus. Read the shape of this table, not its decimal.
+- **The loss curve stops tracking the task at three epochs.** Epoch 4 buys 0.7 pp
+  of tool choice and the trainer's val loss keeps falling (0.0741 → 0.0704) while
+  training loss reaches 0.0196 — memorisation of 600 rows, not better binding.
+  Three epochs is also where the corpus stops teaching extraction and starts
+  teaching "always emit a call" (see the refusal row).
 - **The third epoch costs every refusal.** Refusals go 100% → 0% between two and
   three epochs: all eight out-of-scope rows ("what should I have for dinner",
   "summarise the history of the Byzantine empire") come back as a confident
@@ -460,10 +467,10 @@ Six things the numbers mean, in the order they matter for using this:
   large failure classes are exactly the families whose eval rendering shares the
   least vocabulary with its train rendering (`grep`: "find X in the text" /
   "where does X appear in" → "locate X inside"; `glob`: "list {pattern}" → "what
-  .go files live in {dir}"). The lever is rendering diversity in the corpus,
-  not post-processing in front of the model. The same holdout explains the
-  refusal collapse: train's three out-of-scope strings and eval's three are
-  disjoint, so 30 of 600 rows could not survive three passes.
+  .go files live in {dir}"). The obvious fix to try next was rendering diversity
+  in the corpus; it was tried and it does not work (below). The same holdout
+  explains the refusal collapse: train's three out-of-scope strings and eval's
+  three are disjoint, so 30 of 600 rows could not survive three passes.
 - **`write` is not reachable from the model.** 16 `write` rows, **0 exact at every
   epoch**. It comes back as `grep` with the content string as the pattern, or as
   `read`. Four epochs do start naming the tool (6/16 rows mention `write`, up from
@@ -488,6 +495,35 @@ Six things the numbers mean, in the order they matter for using this:
   adapter. 143 steps per epoch cost ≈20 min on two cores: 286 steps (2 epochs)
   run in ≈41 min, 572 steps (4 epochs) in ≈79 min, and the build plus a bench
   adds ≈6 min.
+
+#### Grep does not need more ways to say it
+
+`grep` carried the largest failure class (19 of 92) and had the fewest train
+renderings — two, against `read`'s four. Widening only `GREP_TEMPLATES["train"]`
+from 2 to 15 renderings, leaving the eval list and all 160 rows byte-identical,
+retrained at three epochs, and benched twice per corpus because one run is not a
+measurement:
+
+| corpus | run | exact | tool set | `read` | `glob` | `grep` | `write` |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 grep renderings | 1 | 60/152 (39.5%) | 59.2% | 43/67 | 17/32 | 0/37 | 0/16 |
+| | 2 | 53/152 (34.9%) | 54.6% | 39/67 | 14/32 | 0/37 | 0/16 |
+| 15 grep renderings | 1 | 49/152 (32.2%) | 52.0% | 32/67 | 17/32 | 0/37 | 0/16 |
+| | 2 | 51/152 (33.6%) | 54.6% | 34/67 | 17/32 | 0/37 | 0/16 |
+
+`grep` exact is **0/37 in all four runs**. The adapter does name `grep` on those
+rows — 10–12 of the 37 — and never once supplies both `pattern` and `text`
+correctly. Fifteen ways of asking moved it by zero rows, so the wall is not
+vocabulary: `grep` is the only tool whose answer is two coupled fields, and the
+other three are a single copied value. What did move is `read`, from 39–43 down to
+32–34 — about five points, outside the sampling band. At a fixed 600 rows, more
+grep phrasings have to come out of repetitions per phrasing everywhere else.
+
+So the corpus is volume-limited, not phrasing-limited. `grep` is 138 of 600
+training rows against 37 of 152 eval rows, and it is at zero for a structural
+reason: two generated fields with a stated order. The two families stuck at 0 are
+the two that need something other than gradient signal — `grep` a format where
+both fields are not free-form (or a verb table), `write` a router.
 
 #### Abstention belongs in code, not in the weights
 
@@ -592,17 +628,17 @@ virtualenv -p python3.12 .venv-train
 The tuned archive is a tool caller, not an extraction model: point
 `NEEDLE_WEIGHTS` at it for a tool-calling workload, and leave §9's sidecar on the
 published weights, which are what the `Extraction` schema was trained against.
-39.5% exact calls at 196 ms is a router that still needs a table around it:
-validate every call against the tool's JSON schema before running it, keep
-`write` and any two-call ritual behind a deterministic resolver, and do not read
-its abstention as a gate (the 3-epoch adapter never declines).
+35–40% exact calls at ~200 ms is a router that still needs a table around it:
+run every call through `internal/tooling.Gate` (schema, grounding, resolution) and
+keep `write` and any two-call ritual behind a deterministic resolver. Its own
+abstention is not a gate — the 3-epoch adapter never declines, which is why the
+gate's fifth rule asks the request rather than the proposal.
 
-Both adapters are archived outside the repo, because rebuilding them is ~40 min
-of CPU and the codespace they were trained on is disposable: `lora-ep3`
-(sha256 `50ea53492af12032519828ac4cbbcb8f23ee565295139035b74e09815f193b5e`) and
-`lora-ep4` (sha256 `4292b988f2ae560fae27d9d94fe43aeccc2fe8ceff57008360bb88641d882696`),
-4.5 MB each, alongside their merged `.cact` exports and per-run predictions.
-Drive is the store of record; the archive is a convenience, not a dependency.
+Each adapter is archived outside the repo, because rebuilding one is ~60 min of
+CPU and the codespace it was trained on is disposable: `lora-ep3`, `lora-ep4` and
+`lora-grep3` (the widened-grep corpus), 4.5 MB each, alongside their merged
+`.cact` exports and per-run predictions. Drive is the store of record; the local
+archive is a convenience, not a dependency.
 
 ---
 
