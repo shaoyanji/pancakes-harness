@@ -378,27 +378,50 @@ response, on the bridge's stderr.
 `.cact` engine on a held-out split. Measured on a 2-core / 8 GB codespace, CPU
 only, 160 held-out rows of which 152 are callable and 11 need two calls:
 
-| | base rung | + LoRA, 1 epoch | + LoRA, 2 epochs | |
-| :--- | ---: | ---: | ---: | :--- |
-| correct tool set | 17.1% | 27.0% | **42.1%** | 2.5x base |
-| exact arguments | 7.9% | 11.2% | **21.7%** | 2.7x base |
-| exact call | 7.9% | 5.3% | **21.1%** | |
-| └ single-call rows (n=141) | 8.5% | 5.7% | 22.7% | |
-| └ multi-call: right call count | 2/11 | 7/11 | 11/11 | |
-| └ multi-call: right tools | 0/11 | 0/11 | 0/11 | |
-| refusals correct (n=8) | 100% | 100% | 100% | |
-| latency p50 | 334 ms | 216 ms | 210 ms | ~100 MB RSS |
-| trainer's own held-out (n=30) | — | 5/30 | 17/30 | vs val loss 0.6788 → 0.3340 |
+| | base rung | 1 epoch | 2 epochs | 3 epochs | 4 epochs |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| correct tool set | 17.1% | 27.0% | 42.1% | 59.2% | **59.9%** |
+| exact arguments | 7.9% | 11.2% | 21.7% | **39.5%** | 38.2% |
+| exact call | 7.9% | 5.3% | 21.1% | **39.5%** | 38.2% |
+| └ single-call rows (n=141) | 8.5% | 5.7% | 22.7% | **42.6%** | 41.1% |
+| └ multi-call: right call count | 2/11 | 7/11 | 11/11 | 9/11 | 8/11 |
+| └ multi-call: right tools | 0/11 | 0/11 | 0/11 | 0/11 | 0/11 |
+| refusals correct (n=8) | 100% | 100% | 100% | **0%** | 0% |
+| parse failures (of 160) | 0 | 0 | 0 | 2 | 0 |
+| latency p50 | 334 ms | 216 ms | 210 ms | 196 ms | 228 ms |
+| trainer's own held-out | — | 5/30 | 17/30 | — | — |
 
-Five things the numbers mean, in the order they matter for using this:
+Every column is the same pinned corpus, the same 12-layer rung and the same 160
+rows; only the epoch count (and the cosine schedule that follows it) differs. Val
+losses are **not** comparable across columns (a 4-epoch run decays over 572 steps
+where a 2-epoch run decays over 286), so only the bench rates are read across rows.
 
-- **Two epochs is what makes it a tool caller; one is a trap.** At one epoch the
-  tool-choice rate nearly doubles (17.1% → 27.0%) while *exact* calls fall below
-  the base rung (7.9% → 5.3%). The adapter has learned to answer but not yet to
-  copy, and it now attempts rows the base rung declined, so its precision drops
-  on a denominator that grew. Judged on exact calls only, the 1-epoch adapter is
-  worse than no adapter at all — which is why an accuracy number read at one
-  epoch is not a result.
+Six things the numbers mean, in the order they matter for using this:
+
+- **One epoch is a trap, and two is under-trained.** At one epoch the tool-choice
+  rate nearly doubles (17.1% → 27.0%) while *exact* calls fall below the base rung
+  (7.9% → 5.3%). The adapter has learned to answer but not yet to copy, and it now
+  attempts rows the base rung declined, so its precision drops on a denominator
+  that grew. Judged on exact calls only, the 1-epoch adapter is worse than no
+  adapter at all — which is why an accuracy number read at one epoch is not a
+  result. Two epochs looked like the answer here until three were run: 21.1% →
+  39.5% exact calls, nearly doubling again on the same data.
+- **Argument binding peaks at three epochs and then stops.** Epoch 4 buys 0.7 pp
+  of tool choice (59.2% → 59.9%) and loses 1.3 pp of exact calls (39.5% → 38.2%,
+  two rows — inside noise), while the trainer's val loss keeps falling (0.0741 →
+  0.0704) and its training loss reaches 0.0196. The loss curve has stopped
+  tracking the task: it is memorising the training set, not binding better. On
+  this corpus and phrase set the ceiling is ≈40% exact calls, reached at epoch 3.
+  Three epochs is also the point where the corpus stops teaching extraction and
+  starts teaching "always emit a call" (see the refusal row).
+- **The third epoch costs every refusal.** Refusals go 100% → 0% between two and
+  three epochs: all eight out-of-scope rows ("what should I have for dinner",
+  "summarise the history of the Byzantine empire") come back as a confident
+  `grep` or `read`. Those rows are 8 of 600 training examples, and at three passes
+  the adapter has fitted the far more common "answer with a call" pattern
+  instead. So the 39.5% is bought with the calibration that made §9's `uncertain`
+  flag meaningful — a caller checking `abstain_rate` must not use this adapter
+  alone as its gate.
 - **The stock model does not answer a command-style request at all.** Asked to
   "cat the contents of internal/preprocess/needle.go", the untuned archive
   returns `function_calls: []` and reasons *"no document retrieval tool
@@ -410,34 +433,52 @@ Five things the numbers mean, in the order they matter for using this:
   invented `pattern` / `file_name` / `file` in its place. With
   `parameters.properties` kept, the 2-epoch adapter invents **zero** unknown keys
   across all 152 callable rows: it now always speaks the schema's vocabulary.
-  What it still gets wrong is the value: 34 single-call rows choose the right
-  tool and still carry a wrong one. Six are exact `pattern` ↔ `text` swaps on
-  "search X for Y", 10 collapse "what .go files live in internal/X" to `go files`
-  where gold is `internal/X/*.go`, and 18 are partial copies. So the remaining
-  error is not vocabulary or syntax — it is argument binding on the harder half
-  of the phrasings.
-- **`write` is not reachable from the model.** 16 single-call `write` rows, 0
-  correct — 13 come back as `grep` with the content string as the pattern, 3 as
-  `read`. The phrasings ("create X containing Y", "put Y into X") read like a
-  search to it. Route writes deterministically; do not try to tune this away with
-  the current corpus.
-- **Multi-call structure is learned, pairing is not.** Every gold multi-call row
-  is `read` + `glob`, and the 2-epoch adapter emits exactly two calls 11/11 times
-  — but never that pair (it proposes `read`+`write`, `grep`+`write`, …). The
-  count is a shape it can infer; which tools go together is a relation, and 42
-  multi-call training rows do not carry it.
+  What it still gets wrong is the value. At three epochs 92 of the 152 callable
+  rows are wrong, and the five largest classes say the residue is lexical, not
+  semantic:
+
+  | failure at 3 epochs | n | example |
+  | :--- | ---: | :--- |
+  | right tool, no arguments | 9 | `fetch the file internal/server/server.go` → `read` with `{}` |
+  | `grep` → `glob` | 19 | `locate vendorHash inside "…"` → `glob` |
+  | `glob`, `/*.go` dropped | 10 | `what .go files live in internal/memory` → `pattern: internal/memory` |
+  | `write` → `grep` / `read` | 16 | `create X containing Y` → `grep` with the content as pattern |
+  | `grep`, `pattern`/`text` swapped | 3 | `search "A" for B` → `pattern: A, text: B` |
+
+  The `grep` → `glob` class alone is 19 of those 92 failures: "locate X inside Y"
+  is a text-scoped search, and the adapter reads "locate X" as a filename guess.
+  That and the `*.go` collapse are mechanical — expanding a bare `internal/X` to
+  `internal/X/*.go` and un-swapping `pattern`/`text` as post-processing moves the
+  same adapter from 39.5% to **46.7%** exact calls without retraining, which is a
+  larger gain than epoch 4 produced. The remaining 35 are binding errors on the
+  harder half of the phrasings.
+- **`write` is not reachable from the model.** 16 `write` rows, **0 exact at every
+  epoch**. It comes back as `grep` with the content string as the pattern, or as
+  `read`. Four epochs do start naming the tool (6/16 rows mention `write`, up from
+  1) but only as a second call after a `read` of the same file, and never with the
+  `ref` + `content` pair the schema wants — the phrasings ("create X containing
+  Y", "put Y into X") read like a search with a quoted needle. Route writes
+  deterministically; do not try to tune this away with the current corpus.
+- **Multi-call structure is learned, pairing is not — and it degrades past two
+  epochs.** Every gold multi-call row is `read` + `glob`, and the 2-epoch adapter
+  emits exactly two calls 11/11 times — but never that pair (it proposes
+  `read`+`write`, `grep`+`write`, …). At three and four epochs the count slips
+  (9/11, 8/11) and two rows are truncated mid-call at the token budget, while the
+  pairing is still 0/11. The count is a shape it can infer; which tools go
+  together is a relation, and 42 multi-call training rows do not carry it.
 - **Depth is a memory wall, not a quality choice.** A 20-layer training compile
   needs about 4.5 GB and is killed on this runner (SIGTERM, ~4.5 GB RSS); 12
-  layers peaks at 3.9 GB. Both sides of the table are the same rung, so the
-  delta is only the adapter. 286 steps (2 epochs × 143) take ≈41 min on two
-  cores; the build plus both benches add ≈6 min.
+  layers peaks at 3.9 GB. Every column is the same rung, so the delta is only the
+  adapter. 143 steps per epoch cost ≈20 min on two cores: 286 steps (2 epochs)
+  run in ≈41 min, 572 steps (4 epochs) in ≈79 min, and the build plus a bench
+  adds ≈6 min.
 
 The tool schemas are dumped from the Go registry rather than hand-written, so the
 dataset cannot drift from the code it describes:
 
 ```bash
 go run ./scripts/dumptools > scripts/needle_tools.json
-PY=.venv-train/bin/python NEEDLE=.venv-train/bin/needle EPOCHS=2 \
+PY=.venv-train/bin/python NEEDLE=.venv-train/bin/needle EPOCHS=3 \
   bash scripts/needle_finetune.sh
 ```
 
@@ -462,9 +503,17 @@ virtualenv -p python3.12 .venv-train
 The tuned archive is a tool caller, not an extraction model: point
 `NEEDLE_WEIGHTS` at it for a tool-calling workload, and leave §9's sidecar on the
 published weights, which are what the `Extraction` schema was trained against.
-21% exact calls at 210 ms is a router: validate every call against the tool's
-JSON schema before running it, and keep `write` and any two-call ritual behind a
-deterministic table rather than behind the model.
+39.5% exact calls at 196 ms is a router that still needs a table around it:
+validate every call against the tool's JSON schema before running it, keep
+`write` and any two-call ritual behind a deterministic resolver, and do not read
+its abstention as a gate (the 3-epoch adapter never declines).
+
+Both adapters are archived outside the repo, because rebuilding them is ~40 min
+of CPU and the codespace they were trained on is disposable: `lora-ep3`
+(sha256 `50ea53492af12032519828ac4cbbcb8f23ee565295139035b74e09815f193b5e`) and
+`lora-ep4` (sha256 `4292b988f2ae560fae27d9d94fe43aeccc2fe8ceff57008360bb88641d882696`),
+4.5 MB each, alongside their merged `.cact` exports and per-run predictions.
+Drive is the store of record; the archive is a convenience, not a dependency.
 
 ---
 
