@@ -1,0 +1,42 @@
+[
+  {
+    "name": "host_fact",
+    "description": "Return one compiled registry field for a NAMED machine. Use only when the question names a host and asks what it is or has: role, cpu, gpu, ram, network address or status.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "host": {"type": "string", "description": "hostname such as frieren, eisen, delphi"},
+        "field": {"type": "string", "enum": ["role", "cpu", "gpu", "ram", "network", "status"]}
+      },
+      "required": ["host", "field"]
+    },
+    "command": ["task", "ops:kg:host", "HOST={host}"],
+    "read_only": true
+  },
+  {
+    "name": "notes_search",
+    "description": "Search the decision-notes store: experiments, proposals, open work and studies. Use for 'which proposals exist about X' or 'open work on X'. Never for documentation files.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "q": {"type": "string", "description": "keywords, not a sentence"}
+      },
+      "required": ["q"]
+    },
+    "command": ["task", "ops:notes:search", "Q={q}"],
+    "read_only": true
+  },
+  {
+    "name": "skills_tagged",
+    "description": "List the skills carrying a tag. Use when the question asks which skills or procedures cover a topic.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "tag": {"type": "string", "description": "tag such as nix, sops, agent"}
+      },
+      "required": ["tag"]
+    },
+    "command": ["task", "ops:kg:tag", "TAG={tag}"],
+    "read_only": true
+  }
+]

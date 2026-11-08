@@ -585,3 +585,38 @@ importance (0.0–1.0), tags, timestamp.
 
 The AST is a DAG validated for: no circular refs, depth/kind consistency,
 parent-child depth consistency, and non-empty content at every node.
+
+## Explainer layer (vox), v0.1.0
+
+A caller, a router and a voice, in one CLI: needle3 picks exactly one tool call,
+a decision model routes it to a lane, and a chat model says the result to a
+person. This is not a new agent loop — it is the smallest surface that makes the
+three model roles usable together, and it stays outside the consult kernel.
+
+Build:
+
+- `internal/vox` — `Tool`/`Manifest` (argv templates, never shell strings),
+  `Caller` (needle3, replay fixture), `Decision` (jev-decide, fixed),
+  `Voice` (cpg chat, static), and the `Engine.Ask` turn
+- `cmd/vox` — `ask`, `decide`, `say`, `tools`, `doctor`
+- `tools.example.json` — three read-only fleet tasks
+
+Rules the layer encodes, each from a measured failure:
+
+1. **Validation before confidence.** An invented tool or an ungrounded argument
+   is a refusal whatever the score says; confidence is reported, never gated on.
+2. **A reducible request escalates.** More than one proposed call is a planner's
+   job, so it is handed on rather than merged.
+3. **A decision is a signal, not an authorisation.** Below the probability and
+   margin gate the turn returns `confirm`, and a non-read-only tool needs
+   `--allow-write` even when the lane is confident.
+4. **A dead voice costs prose, never the result.** The tool answer stands; the
+   reason is reported instead of swallowed.
+5. **The caller sees the schema, not the harness.** Only name, description and
+   `parameters` are sent to a 29M model.
+
+Known constraint: needle3's shipped engine is linux-arm64 only, so every
+x86_64 test target runs `ReplayCaller` and the unit suite; the engine path is
+exercised where the engine exists.
+
+Do not build yet: multi-turn planning, tool synthesis, or a second router.
