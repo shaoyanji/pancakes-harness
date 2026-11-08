@@ -38,6 +38,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(s
 		return runSay(args[1:], stdin, stdout, stderr, getenv)
 	case "tools":
 		return runTools(args[1:], stdout, stderr, getenv)
+	case "battery":
+		return runBattery(args[1:], stdout, stderr, getenv)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr, getenv)
 	case "help", "-h", "--help":
@@ -468,6 +470,7 @@ Usage:
   vox decide -choices "a,b,c" [-state TEXT] <question>
   vox say <text>
   vox tools [-tools FILE]
+  vox battery [-json] [-repeat N] [-threshold 0.8] [-cases FILE] [-tools FILE]
   vox doctor [-json]
   vox version
 
@@ -477,6 +480,7 @@ Exit codes:
 
 Environment:
   VOX_TOOLS            tool manifest (default ./tools.json)
+  VOX_BATTERY          battery cases for the battery subcommand (default ./battery.json)
   VOX_NEEDLE_ENGINE    needle3 engine (fallback NEEDLE_ENGINE)
   VOX_NEEDLE_WEIGHTS   needle3 weights file (fallback NEEDLE_WEIGHTS)
   VOX_JEV              decision client (default: jev-decide on PATH)
