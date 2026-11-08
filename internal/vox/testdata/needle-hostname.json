@@ -1,0 +1,23 @@
+{
+  "type": "call",
+  "success": true,
+  "error": null,
+  "error_code": null,
+  "reason": null,
+  "function_calls": [
+    {
+      "name": "host_name",
+      "arguments": {}
+    }
+  ],
+  "suppressed_calls": [],
+  "reasoning": "'what is this machines hostname' -> host_name. No arguments needed.",
+  "confidence": 0.4094,
+  "prefill_tps": 703.6,
+  "decode_tps": 330.2,
+  "peak_ram_mb": 74.6,
+  "validation": {
+    "ungrounded": [],
+    "negation": false
+  }
+}

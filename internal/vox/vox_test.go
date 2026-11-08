@@ -249,3 +249,76 @@ func TestExplainPromptBoundsAndForbidsInvention(t *testing.T) {
 		t.Fatalf("the packet was not bounded: %d runes", len([]rune(prompt)))
 	}
 }
+
+// TestRecordedEngineOutputParses keeps the shape honest against the binary that
+// produces it: these two files are verbatim needle3 responses, captured on
+// delphi (aarch64) 2026-11-08 from the engine the fleet pins, not hand-written.
+// The engine carries fields the harness ignores (type, success, reasoning,
+// suppressed_calls, prefill_tps) which is the point — a caller that fails to
+// parse a superset would look like a caller that found no tool.
+func TestRecordedEngineOutputParses(t *testing.T) {
+	m := vox.Manifest{Tools: []vox.Tool{
+		{Name: "host_name", Command: []string{"hostname"}, ReadOnly: true},
+		{Name: "disk_free", Command: []string{"df", "-h", "/"}, ReadOnly: true},
+		{Name: "kernel_version", Command: []string{"uname", "-r"}, ReadOnly: true},
+	}}
+	cases := []struct {
+		file string
+		tool string
+	}{
+		{"needle-hostname.json", "host_name"},
+		{"needle-disk.json", "disk_free"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", tc.file))
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			call, ok, err := vox.ParseCall(raw, m)
+			if err != nil {
+				t.Fatalf("a recorded engine response was rejected: %v", err)
+			}
+			if !ok {
+				t.Fatal("a recorded call was read as no call")
+			}
+			if call.Tool != tc.tool {
+				t.Fatalf("want %s, got %s", tc.tool, call.Tool)
+			}
+			if call.Confidence <= 0 || call.Confidence > 1 {
+				t.Fatalf("confidence out of range: %v", call.Confidence)
+			}
+			if call.Calls != 1 {
+				t.Fatalf("want one call, got %d", call.Calls)
+			}
+		})
+	}
+}
+
+// TestRecordedRoundReplaysThroughTheLoop runs a captured round end to end, so
+// the x86_64 targets exercise the same bytes the arm64 engine produced.
+func TestRecordedRoundReplaysThroughTheLoop(t *testing.T) {
+	engine := vox.Engine{
+		Manifest: vox.Manifest{Tools: []vox.Tool{{
+			Name:     "host_name",
+			Command:  []string{"hostname"},
+			ReadOnly: true,
+		}}},
+		Caller:   vox.ReplayCaller{Path: filepath.Join("testdata", "needle-hostname.json")},
+		Decision: vox.FixedDecision{Label: "c0", Probability: 0.99, Margin: 0.9},
+		Voice:    vox.StaticVoice{Text: "This machine is delphi."},
+	}
+	res, err := engine.Ask(context.Background(), "what is this machines hostname")
+	if err != nil {
+		t.Fatalf("ask: %v", err)
+	}
+	if res.Kind != vox.KindActed {
+		t.Fatalf("want acted, got %s (%s)", res.Kind, res.Reason)
+	}
+	if res.Output == "" {
+		t.Fatal("the tool produced no output")
+	}
+	if res.Explanation == "" {
+		t.Fatal("the voice did not run")
+	}
+}
