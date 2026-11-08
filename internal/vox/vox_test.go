@@ -322,3 +322,28 @@ func TestRecordedRoundReplaysThroughTheLoop(t *testing.T) {
 		t.Fatal("the voice did not run")
 	}
 }
+
+// TestAskWithoutAnEngineFallsBackToTheVoice is the x86_64 case: the engine ships
+// arm64 only, so a host without one must still be able to answer — with a chat
+// lane, and saying so, rather than failing the turn.
+func TestAskWithoutAnEngineFallsBackToTheVoice(t *testing.T) {
+	engine := vox.Engine{
+		Manifest: roleManifest(),
+		Caller:   vox.NeedleCaller{},
+		Decision: vox.FixedDecision{Label: "c0", Probability: 0.99, Margin: 0.9},
+		Voice:    vox.StaticVoice{Text: "answered without a lookup."},
+	}
+	res, err := engine.Ask(context.Background(), "what is nix")
+	if err != nil {
+		t.Fatalf("a missing engine must not be a failure: %v", err)
+	}
+	if res.Kind != vox.KindAnswered {
+		t.Fatalf("want answered, got %s (%s)", res.Kind, res.Reason)
+	}
+	if res.Explanation == "" {
+		t.Fatal("the voice did not run")
+	}
+	if !strings.Contains(res.Reason, "chat lane alone") {
+		t.Fatalf("the fallback was not reported: %q", res.Reason)
+	}
+}

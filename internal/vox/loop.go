@@ -67,12 +67,20 @@ func (e Engine) Ask(ctx context.Context, question string) (Result, error) {
 
 	call, ok, err := e.Caller.Call(ctx, question, e.Manifest)
 	if err != nil {
-		if errors.Is(err, ErrUnknownTool) || errors.Is(err, ErrUngrounded) || errors.Is(err, ErrMissingArg) {
+		switch {
+		case errors.Is(err, ErrUnknownTool), errors.Is(err, ErrUngrounded), errors.Is(err, ErrMissingArg):
 			res.Kind = KindDeclined
 			res.Reason = err.Error()
 			return res, nil
+		case errors.Is(err, ErrNoCaller):
+			// No engine on this platform (it ships arm64 only). The question is
+			// still answerable, but only by a chat lane — and answerWithoutCall
+			// checks that one exists instead of assuming it.
+			res.Reason = "no tool caller on this host: answered from the chat lane alone"
+			return e.answerWithoutCall(ctx, question, res)
+		default:
+			return res, err
 		}
-		return res, err
 	}
 
 	if !ok {
