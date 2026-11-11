@@ -1,6 +1,6 @@
 # pancakes-harness
 
-![pancakes-harness: four circuit-etched layers feeding a single speaker](banner.png)
+![pancakes-harness: four circuit-etched layers feeding a single speaker](https://res.cloudinary.com/de1eajx01/image/upload/f_auto,q_auto,w_1200/assets/repos/pancakes-harness)
 
 pancakes-harness is a local-first context and egress kernel. It reconstructs local consult context, shapes a bounded model-facing artifact, persists a replayable consult record for every resolved consult, and exposes a thin ingress API. It is intentionally not the full agent execution/control plane.
 
