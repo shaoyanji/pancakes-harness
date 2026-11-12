@@ -347,3 +347,32 @@ func TestAskWithoutAnEngineFallsBackToTheVoice(t *testing.T) {
 		t.Fatalf("the fallback was not reported: %q", res.Reason)
 	}
 }
+
+// TestAskFallsBackWhenTheCallerCannotGroundAnArgument is the measured battery
+// case: needle3 proposed doc_pages and flagged its own query as absent from the
+// question. The call must not run, but the turn must still answer — the safe
+// outcome is the smaller answer, not exit 3.
+func TestAskFallsBackWhenTheCallerCannotGroundAnArgument(t *testing.T) {
+	engine := vox.Engine{
+		Manifest: roleManifest(),
+		Caller:   vox.ReplayCaller{Path: replayFile(t, `{"function_calls":[{"name":"host_fact","arguments":{"host":"fern","field":"role"}}],"validation":{"ungrounded":["host"]}}`)},
+		Decision: vox.FixedDecision{Label: "c0", Probability: 0.99, Margin: 0.9},
+		Voice:    vox.StaticVoice{Text: "answered without a lookup."},
+	}
+	res, err := engine.Ask(context.Background(), "what is 2 plus 2")
+	if err != nil {
+		t.Fatalf("an ungrounded argument must not fail the turn: %v", err)
+	}
+	if res.Kind != vox.KindAnswered {
+		t.Fatalf("want answered, got %s (%s)", res.Kind, res.Reason)
+	}
+	if res.Output != "" {
+		t.Fatal("a tool ran on an ungrounded argument")
+	}
+	if res.Explanation == "" {
+		t.Fatal("the voice did not run")
+	}
+	if !strings.Contains(res.Reason, "not in the input") {
+		t.Fatalf("the refusal reason was not reported: %q", res.Reason)
+	}
+}
