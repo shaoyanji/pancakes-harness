@@ -68,7 +68,15 @@ func (e Engine) Ask(ctx context.Context, question string) (Result, error) {
 	call, ok, err := e.Caller.Call(ctx, question, e.Manifest)
 	if err != nil {
 		switch {
-		case errors.Is(err, ErrUnknownTool), errors.Is(err, ErrUngrounded), errors.Is(err, ErrMissingArg):
+		case errors.Is(err, ErrUngrounded):
+			// The caller proposed a call and then flagged one of its own
+			// arguments as not in the question. Nothing is executable, but
+			// nothing invented ran either: the smaller answer is the chat
+			// lane, not a dead turn. Measured on the fleet battery, where
+			// "what is 2 plus 2" reached this branch.
+			res.Reason = err.Error() + "; no tool ran"
+			return e.answerWithoutCall(ctx, question, res)
+		case errors.Is(err, ErrUnknownTool), errors.Is(err, ErrMissingArg):
 			res.Kind = KindDeclined
 			res.Reason = err.Error()
 			return res, nil

@@ -603,8 +603,10 @@ Build:
 
 Rules the layer encodes, each from a measured failure:
 
-1. **Validation before confidence.** An invented tool or an ungrounded argument
-   is a refusal whatever the score says; confidence is reported, never gated on.
+1. **Validation before confidence.** An invented tool is a refusal whatever the
+   score says; confidence is reported, never gated on. An ungrounded argument
+   never reaches the tool either, but it is the caller admitting it cannot bind,
+   so the turn answers from the chat lane instead of dying.
 2. **A reducible request escalates.** More than one proposed call is a planner's
    job, so it is handed on rather than merged.
 3. **A decision is a signal, not an authorisation.** Below the probability and
