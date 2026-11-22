@@ -18,7 +18,7 @@ import (
 	"pancakes-harness/internal/vox"
 )
 
-const releaseVersion = "0.1.0"
+const releaseVersion = "0.2.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Getenv))
@@ -99,7 +99,11 @@ func runDecide(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	choices := fs.String("choices", "", "comma-separated options; the winner's text comes back")
 	state := fs.String("state", "", "context the model may read (never a transcript)")
 	instructions := fs.String("instructions", "", "override the default instruction line")
-	timeout := fs.Duration("timeout", 45*time.Second, "whole-call timeout")
+	defaultTimeout := 45 * time.Second
+	if envOr(getenv, "VOX_DECISION") == "chat" {
+		defaultTimeout = 10 * time.Minute
+	}
+	timeout := fs.Duration("timeout", defaultTimeout, "whole-call timeout")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "vox decide: %v\n", err)
 		return 64
@@ -154,7 +158,11 @@ func runDecide(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 func runSay(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv func(string) string) int {
 	fs := flag.NewFlagSet("say", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	timeout := fs.Duration("timeout", 90*time.Second, "whole-call timeout")
+	defaultTimeout := 90 * time.Second
+	if envOr(getenv, "VOX_VOICE") == "chat" {
+		defaultTimeout = 3 * time.Minute
+	}
+	timeout := fs.Duration("timeout", defaultTimeout, "whole-call timeout")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(stderr, "vox say: %v\n", err)
 		return 64
@@ -261,9 +269,12 @@ func runDoctor(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	decision := buildDecision(getenv)
 	if decision == nil {
 		report.Decision = "missing"
-		report.Notes = append(report.Notes, "no decision model: routing falls back to the caller's own pick")
+		report.Notes = append(report.Notes, "no decision model: routing falls back to the caller's own pick; set VOX_DECISION=chat for the in-process router")
 	} else {
 		report.Decision = decision.Name()
+		if _, ok := decision.(vox.ChatDecision); ok {
+			report.DecisionProvider = "OpenAI-compatible chat"
+		}
 		if jev, ok := decision.(vox.JevDecision); ok {
 			report.DecisionProvider = jev.Provider
 			if jev.Provider == "" {
@@ -275,9 +286,12 @@ func runDoctor(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	voice := buildVoice(getenv, true)
 	if voice == nil {
 		report.Voice = "missing"
-		report.Notes = append(report.Notes, "no chat lane: results come back as raw output with no explanation")
+		report.Notes = append(report.Notes, "no chat lane: results come back as raw output with no explanation; set VOX_VOICE=chat for the in-process voice")
 	} else {
 		report.Voice = voice.Name()
+		if chat, ok := voice.(vox.ChatVoice); ok {
+			report.VoiceModel = strings.TrimPrefix(chat.Name(), "chat:")
+		}
 		if cpg, ok := voice.(vox.CPGVoice); ok {
 			report.VoiceModel = cpg.Model
 			if cpg.Model == "" {
@@ -377,11 +391,18 @@ func buildEngine(getenv func(string) string, toolsPath string, allowWrite, voice
 	}
 	minProb, _ := strconv.ParseFloat(envOr(getenv, "VOX_MIN_PROB"), 64)
 	minMargin, _ := strconv.ParseFloat(envOr(getenv, "VOX_MIN_MARGIN"), 64)
+	decision, voice := buildDecision(getenv), buildVoice(getenv, voiceOn)
+	if d, ok := decision.(vox.ChatDecision); ok {
+		if v, ok := voice.(vox.ChatVoice); ok {
+			v.Client = d.Client
+			voice = v
+		}
+	}
 	return vox.Engine{
 		Manifest:   m,
 		Caller:     buildCaller(getenv, replay),
-		Decision:   buildDecision(getenv),
-		Voice:      buildVoice(getenv, voiceOn),
+		Decision:   decision,
+		Voice:      voice,
 		AllowWrite: allowWrite,
 		MinProb:    minProb,
 		MinMargin:  minMargin,
@@ -411,6 +432,10 @@ func buildCaller(getenv func(string) string, replay string) vox.Caller {
 }
 
 func buildDecision(getenv func(string) string) vox.Decision {
+	if envOr(getenv, "VOX_DECISION") == "chat" {
+		samples, _ := strconv.Atoi(envOr(getenv, "VOX_CHAT_SAMPLES"))
+		return vox.ChatDecision{Client: buildChat(getenv), Samples: samples}
+	}
 	bin := envOr(getenv, "VOX_JEV")
 	if bin == "" {
 		bin = lookPath("jev-decide")
@@ -425,6 +450,9 @@ func buildVoice(getenv func(string) string, on bool) vox.Voice {
 	if !on {
 		return nil
 	}
+	if envOr(getenv, "VOX_VOICE") == "chat" {
+		return vox.ChatVoice{Client: buildChat(getenv)}
+	}
 	bin := envOr(getenv, "VOX_CPG")
 	if bin == "" {
 		bin = lookPath("cpg")
@@ -437,6 +465,10 @@ func buildVoice(getenv func(string) string, on bool) vox.Voice {
 		Model:   envOr(getenv, "VOX_CPG_MODEL"),
 		Session: envOr(getenv, "VOX_SESSION"),
 	}
+}
+
+func buildChat(getenv func(string) string) *vox.ChatClient {
+	return &vox.ChatClient{URL: envOr(getenv, "VOX_CHAT_URL"), Model: envOr(getenv, "VOX_CHAT_MODEL"), Key: envOr(getenv, "VOX_CHAT_KEY")}
 }
 
 func envOr(getenv func(string) string, keys ...string) string {
@@ -479,6 +511,12 @@ Exit codes:
   3  declined                 4  escalate (a reasoning model's job)
 
 Environment:
+  VOX_DECISION        chat opts into the in-process router (otherwise jev)
+  VOX_VOICE           chat opts into the in-process voice (otherwise cpg)
+  VOX_CHAT_URL        OpenAI-compatible base URL (default ` + vox.DefaultChatURL + `)
+  VOX_CHAT_MODEL      model for both chat lanes (default ` + vox.DefaultChatModel + `)
+  VOX_CHAT_KEY        optional bearer key (none by default)
+  VOX_CHAT_SAMPLES    sequential router samples (default 3)
   VOX_TOOLS            tool manifest (default ./tools.json)
   VOX_BATTERY          battery cases for the battery subcommand (default ./battery.json)
   VOX_NEEDLE_ENGINE    needle3 engine (fallback NEEDLE_ENGINE)
