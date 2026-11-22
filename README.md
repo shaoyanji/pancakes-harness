@@ -498,6 +498,47 @@ Treat this repo as a thin context/egress harness:
 
 This separation is the main maintenance advantage for fleet operations.
 
+### Vox chat lanes (v0.2.0)
+
+Vox can route and speak in-process without `jev-decide` or `cpg`:
+
+```sh
+VOX_DECISION=chat nix develop -c go run ./cmd/vox decide -choices "apple,brick,cloud" "which one is a fruit?"
+VOX_VOICE=chat nix develop -c go run ./cmd/vox say "Say hello in one sentence."
+VOX_DECISION=chat VOX_VOICE=chat nix develop -c go run ./cmd/vox doctor
+```
+
+Both lanes are explicit opt-ins. Otherwise the existing `VOX_JEV`/`jev-decide`
+and `VOX_CPG`/`cpg` discovery and missing-lane behavior are unchanged. `-voice=false`
+still disables explanations. The voice sends one stateless packet per call;
+tool explanations use the existing bounded `ExplainPrompt`.
+
+| Environment | Default | Meaning |
+| --- | --- | --- |
+| `VOX_DECISION` | jev discovery | `chat` selects the in-process router |
+| `VOX_VOICE` | cpg discovery | `chat` selects the in-process voice |
+| `VOX_CHAT_URL` | `https://api.apisfreellm.com/v1` | OpenAI-compatible base URL |
+| `VOX_CHAT_MODEL` | `free-ai` | Model for both chat lanes |
+| `VOX_CHAT_KEY` | none | Optional bearer key; not sent by default |
+| `VOX_CHAT_SAMPLES` | `3` | Positive sequential sample count (nonpositive/invalid uses default) |
+
+The router sends state, question, instructions and labeled choice text. Since
+this endpoint has no logprobs, confidence is **sample agreement**, not a calibrated
+model probability: probability is top votes / all samples; margin is
+(top - second) / all samples. Only an exact label (after whitespace trimming)
+is valid. Invalid votes lower confidence; all-invalid replies fail. A strict
+majority of all samples yields `selected`, otherwise `needs_review` (ties follow
+choice order). Engine `VOX_MIN_PROB` (0.8) and `VOX_MIN_MARGIN` (0.15) gates still
+apply, so by default all three samples must agree before acting.
+
+Calls from a shared client are sequential and spaced at least one second apart;
+an Engine shares its client between router and voice. HTTP 503 and HTTP 429 with
+a short numeric `Retry-After` (0–5 seconds) retry at most three times, waiting
+2, 4, then 5 seconds (or a longer short `Retry-After`). Daily-limit 429 errors
+fail immediately. Each HTTP call has a 120-second timeout. Chat `decide` defaults
+to a ten-minute whole-call timeout, chat `say` to three minutes; `-timeout`
+overrides these. Provider errors remain visible; no transcript is retained.
+
 ### Highlights
 
 - Added a typed preflight boundary for `/v1/agent-call`

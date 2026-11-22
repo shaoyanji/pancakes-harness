@@ -621,4 +621,11 @@ Known constraint: needle3's shipped engine is linux-arm64 only, so every
 x86_64 test target runs `ReplayCaller` and the unit suite; the engine path is
 exercised where the engine exists.
 
-Do not build yet: multi-turn planning, tool synthesis, or a second router.
+Vox v0.2.0 adds an explicit in-process OpenAI-compatible transport for the same
+router and voice roles (`VOX_DECISION=chat`, `VOX_VOICE=chat`), defaulting to
+APIsFreeLLM `free-ai` without a key. Sequential sampled label votes replace
+unavailable logprobs; a strict majority selects, with the Engine gates unchanged.
+Calls remain stateless, bounded, rate-spaced and covered by local HTTP fixtures.
+The jev/cpg paths and missing-lane behavior remain the default.
+
+Do not build yet: multi-turn planning, tool synthesis, or a second router role.

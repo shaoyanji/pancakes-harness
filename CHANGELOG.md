@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## vox v0.2.0
+
+- Add opt-in in-process chat decision and voice lanes, defaulting to APIsFreeLLM
+  `free-ai` without an API key; other OpenAI-compatible endpoints accept an optional key.
+- Estimate router confidence from sequential label votes, retaining invalid votes
+  in the denominator and leaving the Engine's probability/margin gates intact.
+- Bound and space requests, retry transient provider errors, and surface diagnostics.
+- Report chat lanes in `vox doctor`; preserve default jev/cpg discovery.
+- Add HTTP fixture coverage and document chat configuration.
+
 ## v0.2.5
 
 Release date: 2026-05-07
